@@ -266,10 +266,9 @@ h3aflow/
 
 ## Citation
 
-If you use h3aflow in your research, please cite:
+If you use h3aflow in your research, give props to:
 
-> h3aflow: An end-to-end Nextflow DSL2 pipeline for Illumina H3Africa SNP array processing.
-> GitHub: https://github.com/gbimoko/h3aflow
+> Glory Bimoko & the CPGR Team for making this accessible.
 
 ---
 
