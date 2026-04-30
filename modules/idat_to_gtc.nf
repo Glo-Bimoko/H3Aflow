@@ -13,10 +13,10 @@ process IDAT_TO_GTC {
     script:
     """
     python ${projectDir}/bin/convert_idat2gtc.py \
-        --bpm    "${bpm}"       \
-        --egt    "${egt}"       \
-        --idats  "${idat_dir}"  \
-        --output ${sample_id}.gtc
+        --bpm     "${bpm}"                    \
+        --egt     "${egt}"                    \
+        --idats   "${idat_dir}"               \
+        --output  ${sample_id}.gtc            \
+        --gtc-dir "${params.outdir}/gtc"
     """
 }
-
