@@ -1,0 +1,41 @@
+# Nextflow work directories and logs
+work/
+.nextflow/
+.nextflow.log*
+.nextflow.log
+
+# Pipeline results (large data files)
+results/
+
+# Large binary assets — store these outside the repo
+*.gtc
+*.bcf
+*.bcf.csi
+*.idat
+*.bam
+*.bai
+*.fasta
+*.fa
+*.fa.fai
+*.fai
+*.bpm
+*.egt
+*.gz
+*.zip
+
+# Log files
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+#all the data files 
+prof_segun/

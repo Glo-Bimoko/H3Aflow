@@ -1,0 +1,80 @@
+#!/bin/bash
+#PBS -l select=1:ncpus=8:mpiprocs=8:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -q gpu_1
+
+#PBS -P CBBI1369
+#PBS -o /mnt/lustre/users/gbimoko/idat2vcf-pipeline/logs/pipeline_stdout.txt
+#PBS -e /mnt/lustre/users/gbimoko/idat2vcf-pipeline/logs/pipeline_stderr.txt
+#PBS -N idat2vcf_pipeline
+#PBS -M gbimoko@chpc.ac.za
+#PBS -m abe
+
+# ── Load modules ──────────────────────────────────────────────────────────────
+module load chpc/BIOMODULES
+module load bcftools/1.17
+module load chpc/nextflow/25.04.4
+module load python/3.9.6
+
+# ── Environment ───────────────────────────────────────────────────────────────
+export BCFTOOLS_PLUGINS=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/bin/plugins/gtc2vcf
+export NXF_HOME=/mnt/lustre/users/gbimoko/.nextflow
+export NXF_TEMP=/mnt/lustre/users/gbimoko/.nextflow_tmp
+export NXF_WORK=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/work
+export NXF_OFFLINE=true
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+PIPELINE_DIR=/mnt/lustre/users/gbimoko/idat2vcf-pipeline
+SAMPLESHEET=/home/gbimoko/create_samplesheet/made_samplesheet.csv
+
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
+for f in "$SAMPLESHEET" \
+    "${PIPELINE_DIR}/bin/bpm_and_cluster/H3Africa_2019_20037295_A1.bpm" \
+    "${PIPELINE_DIR}/bin/bpm_and_cluster/H3Africa_2019_Gentrain_A1_ClusterFile_Final.egt" \
+    "/mnt/lustre/users/gbimoko/GRCh37/human_g1k_v37.fasta"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: Required file not found: $f" >&2
+        exit 1
+    fi
+done
+
+if [ ! -d "/mnt/lustre/users/gbimoko/idat2vcf-pipeline/prof_segun/data/ready" ]; then
+    echo "ERROR: idat root not found" >&2
+    exit 1
+fi
+
+# Verify bcftools plugin loads
+bcftools +idat2gtc 2>&1 | grep -q "bpm option" || {
+    echo "ERROR: bcftools +idat2gtc plugin not loading correctly" >&2
+    exit 1
+}
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+mkdir -p ${PIPELINE_DIR}/logs
+cd ${PIPELINE_DIR}
+
+echo "=========================================="
+echo " idat2vcf Pipeline"
+echo " Start : $(date)"
+echo " Job   : ${PBS_JOBID}"
+echo " Node  : $(hostname)"
+echo " CPUs  : $(nproc)"
+echo "=========================================="
+
+# ── Run pipeline ──────────────────────────────────────────────────────────────
+nextflow run main.nf \
+    --samplesheet "${SAMPLESHEET}" \
+    -resume \
+    -with-trace   "${PIPELINE_DIR}/logs/trace.txt" \
+    -with-report  "${PIPELINE_DIR}/logs/report.html" \
+    -with-timeline "${PIPELINE_DIR}/logs/timeline.html" \
+    2>&1 | tee "${PIPELINE_DIR}/logs/nextflow_run.log"
+
+NXF_EXIT=${PIPESTATUS[0]}
+
+echo "=========================================="
+echo " End    : $(date)"
+echo " Status : ${NXF_EXIT}"
+echo "=========================================="
+
+exit ${NXF_EXIT}
