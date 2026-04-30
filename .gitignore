@@ -22,6 +22,9 @@ results/
 *.egt
 *.gz
 *.zip
+#keeping the nextflwow.config local for now until i remove our group and other details from there 
+*.config
+*.qsub
 
 # Log files
 logs/
