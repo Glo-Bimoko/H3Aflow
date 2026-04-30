@@ -1,6 +1,6 @@
 # h3aflow
 
-**A Nextflow DSL2 pipeline for end-to-end processing of Illumina H3Africa SNP array data — from raw idat files to QC-passed, analysis-ready PLINK datasets.**
+**A Nextflow DSL2 pipeline for end-to-end processing of Illumina H3Africa SNP array data. From raw idat files to QC-passed, analysis-ready PLINK datasets.**
 
 [![Nextflow](https://img.shields.io/badge/nextflow%20DSL2-%E2%89%A522.10-23aa62.svg)](https://www.nextflow.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -59,7 +59,7 @@ You must supply your own Illumina manifest and cluster files matching your array
 | `*.egt` | Illumina EGT cluster file |
 | `*.fasta` + `.fai` | Reference genome (GRCh37 recommended for H3Africa arrays) |
 
-> **Important:** The BPM and EGT must be from the same array revision. The H3Africa 2019 array has A1 and B1 revisions — mismatching them will cause probe lookup failures.
+> **Important:** The BPM and EGT must be from the same array revision. The H3Africa 2019 array has A1 and B1 revisions. mismatching them will cause probe lookup failures.
 
 ---
 
@@ -87,7 +87,7 @@ The samplesheet is a CSV file with the following columns (header names are case-
 | Column | Description | Example |
 |---|---|---|
 | Sample ID | Unique sample identifier | `7801848` |
-| BeadChip Barcode | Illumina array barcode — used to locate idat files | `205695340002` |
+| BeadChip Barcode | Illumina array barcode used to locate idat files | `205695340002` |
 | Sentrix Position | Position on the BeadChip | `R01C01` |
 | Plate Number | Batch/plate grouping | `Plate_01` |
 | Well Position | Optional, carried through for traceability | `A01` |
@@ -204,7 +204,7 @@ results/
 
 ## Comparison with h3agwas
 
-h3aflow is a complete, standalone pipeline. It does not require h3agwas to perform QC. The two pipelines are complementary — h3aflow covers everything from raw idat files through QC, while h3agwas covers association testing and meta-analysis:
+h3aflow is a complete, standalone pipeline. It does not require h3agwas to perform QC. The two pipelines are complementary. H3aflow covers everything from raw idat files through QC, while h3agwas covers association testing and meta-analysis:
 
 | Capability | h3aflow | h3agwas |
 |---|---|---|
@@ -220,7 +220,7 @@ h3aflow is a complete, standalone pipeline. It does not require h3agwas to perfo
 | Meta-analysis | ❌ | ✅ |
 | DSL2 | ✅ | ❌ (requires NXF ≤ 22.10) |
 
-h3aflow produces a fully QC-passed `cohort_qc.bed / .bim / .fam` dataset. If you wish to proceed to association testing, this output is directly compatible with the h3agwas `assoc` workflow — no format conversion needed.
+h3aflow produces a fully QC-passed `cohort_qc.bed / .bim / .fam` dataset. If you wish to proceed to association testing, this output is directly compatible with the h3agwas `assoc` workflow, no format conversion needed.
 
 ---
 
