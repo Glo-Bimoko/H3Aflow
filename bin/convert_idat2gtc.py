@@ -65,9 +65,13 @@ if result.stderr:
 if result.returncode != 0:
     # Check if the failure was due to a missing idat file
     stderr_text = result.stderr if result.stderr else ""
-    if "No such file or directory" in stderr_text or "Could not open" in stderr_text:
+    if ("No such file or directory" in stderr_text
+            or "Could not open" in stderr_text
+            or "Error while running linsolve" in stderr_text
+            or "linsolve" in stderr_text.lower()):
         print(
-            f"[convert_idat2gtc] WARNING: One or more idat files missing in {idats}. "
+            f"[convert_idat2gtc] WARNING: Some samples could not be processed in {idats}. "
+            f"Reason may be missing idat files or numerical failure during normalization. "
             f"Skipping affected samples and continuing with available pairs.",
             file=sys.stderr, flush=True
         )
