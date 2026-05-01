@@ -10,21 +10,21 @@ process REPORT {
     path sex_info
 
     output:
-    path "qc_report.html",            emit: html
-    path "flagged_samples.tsv",       emit: flagged
-    path "cohort_summary.tsv",        emit: summary
+    path "qc_report.html"
+    path "flagged_samples.tsv"
+    path "cohort_summary.tsv"
 
     script:
     """
-    python ${projectDir}/bin/generate_report.py \
-        --sexcheck  ${sexcheck}  \
-        --xy_tsv    ${xy_tsv}    \
-        --qc_stats  ${qc_stats}  \
-        --genome    ${genome}    \
-        --eigenvec  ${eigenvec}  \
-        --sex_info  ${sex_info}  \
-        --out_html  qc_report.html       \
-        --out_flagged flagged_samples.tsv \
+    python ${projectDir}/bin/generate_report.py \\
+        --sexcheck  ${sexcheck} \\
+        --xy_tsv    ${xy_tsv} \\
+        --qc_stats  ${qc_stats} \\
+        --genome    ${genome} \\
+        --eigenvec  ${eigenvec} \\
+        --sex_info  ${sex_info} \\
+        --out_html  qc_report.html \\
+        --out_flagged flagged_samples.tsv \\
         --out_summary cohort_summary.tsv
     """
 }

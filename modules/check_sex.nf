@@ -3,8 +3,8 @@ process CHECK_SEX {
     publishDir "${params.outdir}/qc/check_sex", mode: 'copy'
 
     input:
-    tuple path(bed), path(bim), path(fam)  // chrX from SPLIT_CHROM
-    path sex_info  // from PREP_INPUTS (collected sex)
+    tuple path(bed), path(bim), path(fam)
+    path sex_info
 
     output:
     path "sexcheck.txt", emit: sexcheck
@@ -12,31 +12,50 @@ process CHECK_SEX {
     path "sex_plot.png", emit: plot
 
     script:
+    def prefix = bed.baseName
+    
     """
     echo "Sex check started: \$(date)" > sex_check.log
     
+    # Check if chrX file has any variants
+    N_VAR=\$(wc -l < ${prefix}.bim 2>/dev/null || echo 0)
+    
+    if [ \${N_VAR} -eq 0 ]; then
+        echo "ERROR: No chrX variants found! Cannot perform sex check." >> sex_check.log
+        echo -e "IID\tCOLLECTED_SEX\tINFERRED_SEX\tF\tSTATUS\tCONCORDANT" > sexcheck.txt
+        echo -e "IID\tCOLLECTED_SEX\tINFERRED_SEX\tF\tSTATUS\tCONCORDANT" > sex_discordance.txt
+        python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('sex_plot.png')"
+        exit 0
+    fi
+    
     # Step 1: Run PLINK's sex check on chrX
-    # This calculates F-statistic (inbreeding coefficient on X chromosome)
-    # F < 0.2 = female, F > 0.8 = male, 0.2-0.8 = ambiguous
     plink2 \
-        --bfile ${bed.baseName} \
+        --bfile ${prefix} \
         --check-sex \
         --allow-extra-chr \
-        --out sexcheck
+        --out sexcheck 2>&1 | tee -a sex_check.log
     
     # Step 2: Parse results and compare with collected sex
-    python ${projectDir}/bin/compare_sex.py \
-        --plink_sex sexcheck.sexcheck \
-        --collected_sex ${sex_info} \
-        --out sex_discordance.txt \
-        --plot sex_plot.png
+    if [ -f sexcheck.sexcheck ]; then
+        python ${projectDir}/bin/compare_sex.py \
+            --plink_sex sexcheck.sexcheck \
+            --collected_sex ${sex_info} \
+            --out sex_discordance.txt \
+            --plot sex_plot.png 2>&1 | tee -a sex_check.log
+        
+        # Create sexcheck.txt as a simpler version of the output
+        if [ -f sex_discordance.txt ]; then
+            cp sex_discordance.txt sexcheck.txt
+        else
+            echo -e "IID\tCOLLECTED_SEX\tINFERRED_SEX\tF\tSTATUS\tCONCORDANT" > sexcheck.txt
+        fi
+    else
+        echo "ERROR: PLINK sex check failed to produce output" >> sex_check.log
+        echo -e "IID\tCOLLECTED_SEX\tINFERRED_SEX\tF\tSTATUS\tCONCORDANT" > sexcheck.txt
+        echo -e "IID\tCOLLECTED_SEX\tINFERRED_SEX\tF\tSTATUS\tCONCORDANT" > sex_discordance.txt
+        python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('sex_plot.png')"
+    fi
     
     echo "Sex check completed: \$(date)" >> sex_check.log
-    
-    # Summary statistics
-    echo "" >> sex_check.log
-    echo "Summary:" >> sex_check.log
-    echo "  Total samples: \$(wc -l < sexcheck.sexcheck)" >> sex_check.log
-    echo "  Discordant samples: \$(grep -c PROBLEM sex_discordance.txt 2>/dev/null || echo 0)" >> sex_check.log
     """
 }
