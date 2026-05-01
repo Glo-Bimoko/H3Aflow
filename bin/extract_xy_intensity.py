@@ -11,6 +11,8 @@ Expected TSV columns (bcftools gtc2vcf --format GTC output):
   SAMPLE_ID  CHR  NORMX  NORMY  [other columns ignored]
 
 The script is tolerant of column-name casing and common aliases.
+Memory-efficient: reads the TSV in chunks so large files (10+ GB) are handled
+without loading everything into RAM at once.
 """
 
 import argparse
@@ -20,65 +22,113 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Extract XY intensities from GTC TSV")
-parser.add_argument("--tsv",      required=True,  help="Concatenated GTC TSV (all plates)")
-parser.add_argument("--sex_info", required=True,  help="TSV: sampleid, sex (0=Female, 1=Male)")
-parser.add_argument("--out",      required=True,  help="Output TSV path")
-parser.add_argument("--plot",     required=True,  help="Output PNG path")
+parser.add_argument("--tsv",       required=True,  help="Concatenated GTC TSV (all plates)")
+parser.add_argument("--sex_info",  required=True,  help="TSV: sampleid, sex (0=Female, 1=Male)")
+parser.add_argument("--out",       required=True,  help="Output TSV path")
+parser.add_argument("--plot",      required=True,  help="Output PNG path")
+parser.add_argument("--chunksize", type=int, default=2_000_000,
+                    help="Rows per chunk when reading TSV (default: 2000000)")
 args = parser.parse_args()
 
-# ── Load GTC TSV ───────────────────────────────────────────────────────────────
-print(f"[extract_xy_intensity] Reading {args.tsv} …", flush=True)
-gtc = pd.read_csv(args.tsv, sep="\t", low_memory=False)
-gtc.columns = gtc.columns.str.strip().str.upper()
-
-# Resolve column aliases
+# ── Column aliases ─────────────────────────────────────────────────────────────
 SAMPLE_ALIASES = ["SAMPLE_ID", "SAMPLEID", "SAMPLE", "ID"]
 X_ALIASES      = ["NORMX", "X_NORM", "X_RAW", "NORMALISEDX", "X"]
 Y_ALIASES      = ["NORMY", "Y_NORM", "Y_RAW", "NORMALISEDY", "Y"]
 CHR_ALIASES    = ["CHR", "CHROM", "#CHROM", "CHROMOSOME"]
 
-def resolve_col(df, aliases, label):
+def resolve_col(columns, aliases, label):
     for a in aliases:
-        if a in df.columns:
+        if a in columns:
             return a
     sys.exit(
         f"[extract_xy_intensity] ERROR: Could not find {label} column.\n"
-        f"  Tried: {aliases}\n  Found: {list(df.columns)}"
+        f"  Tried: {aliases}\n  Found: {list(columns)}"
     )
 
-col_sample = resolve_col(gtc, SAMPLE_ALIASES, "SAMPLE_ID")
-col_x      = resolve_col(gtc, X_ALIASES,      "NORMX")
-col_y      = resolve_col(gtc, Y_ALIASES,       "NORMY")
-col_chr    = resolve_col(gtc, CHR_ALIASES,     "CHR")
+# ── Peek at header to resolve column names and select only needed cols ─────────
+print(f"[extract_xy_intensity] Reading {args.tsv} …", flush=True)
 
-# Coerce intensity columns to numeric (bcftools may write '.' for missing)
-gtc[col_x] = pd.to_numeric(gtc[col_x], errors="coerce")
-gtc[col_y] = pd.to_numeric(gtc[col_y], errors="coerce")
+header_df = pd.read_csv(args.tsv, sep="\t", nrows=0)
+header_df.columns = header_df.columns.str.strip().str.upper()
+all_cols = list(header_df.columns)
 
-# ── Compute per-sample means (all autosomes + sex chrs) ───────────────────────
-# Also compute means restricted to chrX and chrY for sex QC context
-chrom_str = gtc[col_chr].astype(str).str.upper().str.lstrip("CHR")
+col_sample = resolve_col(all_cols, SAMPLE_ALIASES, "SAMPLE_ID")
+col_x      = resolve_col(all_cols, X_ALIASES,      "NORMX")
+col_y      = resolve_col(all_cols, Y_ALIASES,       "NORMY")
+col_chr    = resolve_col(all_cols, CHR_ALIASES,     "CHR")
 
-autosome_mask = chrom_str.str.match(r"^\d+$")
-chrx_mask     = chrom_str.isin(["X", "23"])
-chry_mask     = chrom_str.isin(["Y", "24"])
+needed_cols = [col_sample, col_chr, col_x, col_y]
+print(f"[extract_xy_intensity] Using columns: {needed_cols}", flush=True)
 
-def mean_intensity(sub, x_col, y_col, sample_col):
-    """Return per-sample mean X and Y from a subset of rows."""
-    return (
-        sub.groupby(sample_col)[[x_col, y_col]]
-        .mean()
-        .rename(columns={x_col: "MEAN_X", y_col: "MEAN_Y"})
-    )
+# ── Accumulators for chunked mean computation ──────────────────────────────────
+# For each (sample, group) we track sum_x, sum_y, count so we can compute means
+# without holding all rows in memory.
+# Groups: 'all', 'auto', 'X', 'Y'
 
-df_all  = mean_intensity(gtc,                    col_x, col_y, col_sample)
-df_auto = mean_intensity(gtc[autosome_mask],     col_x, col_y, col_sample).add_suffix("_AUTO")
-df_x    = mean_intensity(gtc[chrx_mask],         col_x, col_y, col_sample).add_suffix("_X")
-df_y    = mean_intensity(gtc[chry_mask],         col_x, col_y, col_sample).add_suffix("_Y")
+from collections import defaultdict
+
+# accum[group][sample] = [sum_x, sum_y, count]
+accum = {g: defaultdict(lambda: [0.0, 0.0, 0]) for g in ("all", "auto", "X", "Y")}
+
+chunk_n = 0
+for chunk in pd.read_csv(
+    args.tsv, sep="\t",
+    usecols=needed_cols,
+    chunksize=args.chunksize,
+    low_memory=False
+):
+    chunk.columns = chunk.columns.str.strip().str.upper()
+    chunk[col_x] = pd.to_numeric(chunk[col_x], errors="coerce")
+    chunk[col_y] = pd.to_numeric(chunk[col_y], errors="coerce")
+    chunk = chunk.dropna(subset=[col_x, col_y])
+
+    chrom_str = chunk[col_chr].astype(str).str.upper().str.lstrip("CHR")
+    auto_mask = chrom_str.str.match(r"^\d+$")
+    chrx_mask = chrom_str.isin(["X", "23"])
+    chry_mask = chrom_str.isin(["Y", "24"])
+
+    masks = {
+        "all":  pd.Series(True, index=chunk.index),
+        "auto": auto_mask,
+        "X":    chrx_mask,
+        "Y":    chry_mask,
+    }
+
+    for grp_name, mask in masks.items():
+        sub = chunk[mask]
+        if sub.empty:
+            continue
+        for sample, grp in sub.groupby(col_sample):
+            a = accum[grp_name][sample]
+            a[0] += grp[col_x].sum()
+            a[1] += grp[col_y].sum()
+            a[2] += len(grp)
+
+    chunk_n += 1
+    if chunk_n % 10 == 0:
+        print(f"[extract_xy_intensity] Processed {chunk_n * args.chunksize:,} rows …",
+              flush=True)
+
+print(f"[extract_xy_intensity] Finished reading. Building summary …", flush=True)
+
+# ── Build summary dataframe from accumulators ──────────────────────────────────
+def accum_to_df(acc, x_col, y_col):
+    rows = []
+    for sample, (sx, sy, n) in acc.items():
+        rows.append({
+            "IID":  sample,
+            x_col: sx / n if n > 0 else np.nan,
+            y_col: sy / n if n > 0 else np.nan,
+        })
+    return pd.DataFrame(rows).set_index("IID") if rows else pd.DataFrame()
+
+df_all  = accum_to_df(accum["all"],  "MEAN_X",      "MEAN_Y")
+df_auto = accum_to_df(accum["auto"], "MEAN_X_AUTO", "MEAN_Y_AUTO")
+df_x    = accum_to_df(accum["X"],    "MEAN_X_X",    "MEAN_Y_X")
+df_y    = accum_to_df(accum["Y"],    "MEAN_X_Y",    "MEAN_Y_Y")
 
 summary = (
     df_all
@@ -86,7 +136,6 @@ summary = (
     .join(df_x,    how="left")
     .join(df_y,    how="left")
     .reset_index()
-    .rename(columns={col_sample: "IID"})
 )
 
 # ── Merge sex_info ─────────────────────────────────────────────────────────────
@@ -108,15 +157,14 @@ print(f"[extract_xy_intensity] Written {len(summary)} samples → {args.out}", f
 
 # ── Plot ───────────────────────────────────────────────────────────────────────
 SEX_PALETTE = {
-    "Male":    "#2196F3",   # blue
-    "Female":  "#E91E63",   # pink
-    "Unknown": "#9E9E9E",   # grey
+    "Male":    "#2196F3",
+    "Female":  "#E91E63",
+    "Unknown": "#9E9E9E",
 }
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 fig.suptitle("X / Y Raw Intensity QC", fontsize=14, fontweight="bold")
 
-# --- Panel 1: mean chrX vs mean chrY intensity (sex separation plot) ----------
 ax = axes[0]
 for sex, grp in summary.groupby("COLLECTED_SEX"):
     ax.scatter(
@@ -130,7 +178,6 @@ ax.set_title("chrX vs chrY Intensity\n(coloured by collected sex)", fontsize=11)
 ax.legend(title="Collected Sex", framealpha=0.7)
 ax.grid(True, linewidth=0.4, alpha=0.5)
 
-# --- Panel 2: genome-wide mean X vs mean Y intensity (overall signal level) ---
 ax = axes[1]
 for sex, grp in summary.groupby("COLLECTED_SEX"):
     ax.scatter(
