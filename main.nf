@@ -122,7 +122,7 @@ workflow {
     // -------------------------------------------------------------------------
     // Stage 6 – merge all per-plate PLINK sets → cohort dataset
     // -------------------------------------------------------------------------
-    ch_plink_beds = VCF_TO_PLINK.out.plink.collect()
+    ch_plink_beds = VCF_TO_PLINK.out.plink.map { plate, bed, bim, fam -> [bed, bim, fam] }.collect()
     MERGE_PLINK(ch_plink_beds)
 
     // -------------------------------------------------------------------------
