@@ -2,7 +2,7 @@ process GTC_TO_VCF {
     tag "$plate"
     publishDir "${params.outdir}/bcf", mode: 'copy', pattern: "*.bcf*"
     publishDir "${params.outdir}/tsv", mode: 'copy', pattern: "*.tsv"
-
+   
     input:
     tuple val(plate), path(gtc_files)
     val bpm
@@ -18,6 +18,9 @@ process GTC_TO_VCF {
     // Sanitise plate name for use as filename (replace spaces/special chars)
     def safe_plate = plate.replaceAll(/[^A-Za-z0-9_\-]/, '_')
     """
+    # Ensure the BCFTOOLS_PLUGINS environment variable is set for the plugin to be found
+    export BCFTOOLS_PLUGINS=${projectDir}/bin/plugins/gtc2vcf
+
     ls -1 *.gtc > gtc_list.txt
 
     python ${projectDir}/bin/convert_gtc2vcf.py \

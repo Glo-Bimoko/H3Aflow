@@ -1,5 +1,6 @@
 process LINK_IDATS {
     tag "$sample_id"
+    publishDir "${params.outdir}/linked_idats", mode: 'symlink'
 
     input:
     tuple val(sample_id), val(idat_dir), val(plate)

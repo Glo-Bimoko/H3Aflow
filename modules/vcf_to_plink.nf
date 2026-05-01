@@ -28,7 +28,7 @@ process VCF_TO_PLINK {
     # Rename to original plate name if sanitised name differs
     if [ "${safe}" != "${plate}" ]; then
         for ext in bed bim fam log; do
-            [ -f "${safe}.${ext}" ] && mv "${safe}.${ext}" "${plate}.${ext}" || true
+            [ -f "${safe}.\${ext}" ] && mv "${safe}.\${ext}" "${plate}.\${ext}" || true
         done
     fi
     """

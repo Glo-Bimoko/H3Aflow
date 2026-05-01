@@ -17,6 +17,6 @@ process IDAT_TO_GTC {
         --egt     "${egt}"                    \
         --idats   "${idat_dir}"               \
         --output  ${sample_id}.gtc            \
-        --gtc-dir "/home/gbimoko/lustre/idat2vcf-pipeline/idat2vcf-pipeline/results/gtc"
+        --gtc-dir "/home/eiko/Desktop/H3Aflow/results/gtc" 
     """
 }

@@ -9,7 +9,7 @@ Usage:
         --bpm       /path/to/manifest.bpm          \
         --egt       /path/to/clusters.egt           \
         --gtcs      gtc_list.txt                    \
-        --fasta     /path/to/reference.fa           \
+        --fasta-ref /path/to/reference.fa           \
         --outprefix Plate_1
 
 Outputs:
@@ -26,19 +26,21 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+import os 
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--bpm",       required=True)
 parser.add_argument("--egt",       required=True)
 parser.add_argument("--gtcs",      required=True, help="File listing GTC paths, one per line")
-parser.add_argument("--fasta",     required=True)
+parser.add_argument("--fasta-ref", required=True)
 parser.add_argument("--outprefix", required=True)
 args = parser.parse_args()
 
 bpm       = Path(args.bpm).resolve()
 egt       = Path(args.egt).resolve()
 gtcs_list = Path(args.gtcs)
-fasta     = Path(args.fasta).resolve()
+fasta     = Path(args.fasta_ref).resolve()
 prefix    = args.outprefix
 
 bcf_out   = Path(f"{prefix}.bcf")
@@ -66,7 +68,7 @@ gtc2vcf_cmd = (
     ["bcftools", "+gtc2vcf",
      "--bpm",    str(bpm),
      "--egt",    str(egt),
-     "--fasta",  str(fasta),
+     "--fasta-ref",  str(fasta),
      "--output", unsorted_bcf,
      "--output-type", "b",
      "--no-version"]
@@ -76,7 +78,7 @@ gtc2vcf_cmd = (
 print(f"\n[convert_gtc2vcf] Step 1: GTC → BCF", flush=True)
 print(f"  {' '.join(gtc2vcf_cmd[:8])} ... [{len(gtc_files)} GTC files]", flush=True)
 
-result = subprocess.run(gtc2vcf_cmd, capture_output=True, text=True)
+result = subprocess.run(gtc2vcf_cmd, capture_output=True, text=True, env=os.environ)
 if result.stdout:
     print(result.stdout, flush=True)
 if result.stderr:

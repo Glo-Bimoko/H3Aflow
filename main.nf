@@ -152,7 +152,7 @@ workflow {
     // -------------------------------------------------------------------------
     // Stage 10 – X/Y raw intensity from GTC .tsv files
     // -------------------------------------------------------------------------
-    ch_tsv_files = GTC_TO_VCF.out.tsv.collect()
+    ch_tsv_files = GTC_TO_VCF.out.tsv.map { plate, tsv -> tsv }.collect()
     XY_INTENSITY(ch_tsv_files, ch_sex_info)
 
     // -------------------------------------------------------------------------
