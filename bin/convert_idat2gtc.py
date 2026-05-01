@@ -58,7 +58,7 @@ sample_id = output.stem
 
 existing_gtc = None
 if args.gtc_dir:
-    candidate = Path(args.gtc_dir) / f"{sample_id}.gtc"
+    candidate = Path(args.gtc_dir).resolve() / f"{sample_id}.gtc"
     if candidate.exists():
         existing_gtc = candidate
 
