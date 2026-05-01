@@ -12,8 +12,9 @@ process XY_INTENSITY {
     script:
     """
     # Concatenate all plate TSV files (header from first file only)
-    head -1 \$(ls *.tsv | head -1) > all_samples.tsv
-    for f in *.tsv; do tail -n +2 "\$f" >> all_samples.tsv; done
+    PLATE_TSVS=\$(ls *.tsv | grep -v all_samples.tsv)
+    head -1 \$(echo "\$PLATE_TSVS" | head -1) > all_samples.tsv
+    for f in \$PLATE_TSVS; do tail -n +2 "\$f" >> all_samples.tsv; done
 
     python ${projectDir}/bin/extract_xy_intensity.py \
         --tsv      all_samples.tsv \
