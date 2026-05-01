@@ -1,6 +1,6 @@
 process IDAT_TO_GTC {
     tag "$sample_id"
-    publishDir "${params.outdir}/gtc", mode: 'copy', pattern: "*.gtc"
+    publishDir "${params.outdir}/gtc", mode: 'symlink', pattern: "*.gtc"
 
     input:
     tuple val(sample_id), path(idat_dir), val(plate)
@@ -17,6 +17,6 @@ process IDAT_TO_GTC {
         --egt     "${egt}"                    \
         --idats   "${idat_dir}"               \
         --output  ${sample_id}.gtc            \
-        --gtc-dir "${params.outdir}/gtc"
+        --gtc-dir "/home/gbimoko/lustre/idat2vcf-pipeline/idat2vcf-pipeline/results/gtc"
     """
 }
