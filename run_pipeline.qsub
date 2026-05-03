@@ -4,7 +4,7 @@
 #PBS -l walltime=144:00:00
 #PBS -q seriallong
 
-#PBS -P add your own
+#PBS -P add your own  // ← EDIT THIS
 #PBS -o /mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/logs/pipeline_stdout.txt
 #PBS -e /mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/logs/pipeline_stderr.txt
 #PBS -N H3aFlow 
@@ -25,7 +25,7 @@ module load chpc/nextflow/25.04.4
 export BCFTOOLS_PLUGINS=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/bin/plugins/gtc2vcf
 #export NXF_HOME=/mnt/lustre/users/gbimoko/.nextflow
 export NXF_TEMP=/mnt/lustre/users/gbimoko/.nextflow_tmp
-export NXF_WORK=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/work
+export NXF_WORK=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/work
 mkdir -p ${NXF_WORK} ${NXF_TEMP} ${NXF_HOME}
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
