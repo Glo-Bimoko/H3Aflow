@@ -1,7 +1,7 @@
 """
 generate_report.py
 ==================
-Compiles a self-contained HTML QC report for the idat2vcf pipeline.
+Compiles a self-contained HTML QC report for the H3aFlow pipeline.
 Reads all upstream QC outputs and writes:
   --out_html     qc_report.html        (standalone HTML; no external deps)
   --out_flagged  flagged_samples.tsv   (union of all QC failures)
@@ -385,7 +385,7 @@ html = f"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>idat2vcf Pipeline – QC Report</title>
+<title>H3aFlow – QC Report</title>
 <style>
   /* ── Reset & base ── */
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -487,7 +487,7 @@ html = f"""<!DOCTYPE html>
 <body>
 
 <header>
-  <h1>idat2vcf Pipeline – QC Report</h1>
+  <h1>H3aFlow – QC Report</h1>
   <p>Generated: {now} &nbsp;|&nbsp; {total_samples} samples</p>
 </header>
 
