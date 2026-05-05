@@ -87,7 +87,7 @@ process IBD {
             # Create basic output files if Python fails
             head -100 ibd.genome > ibd_duplicates.tsv
             echo -e "FID1\tIID1\tFID2\tIID2\tPI_HAT" > genetically_identical.tsv
-        fi
+        }
     else
         echo "ERROR: No IBD output generated" >> ibd.log
         echo -e "FID1\tIID1\tFID2\tIID2\tPI_HAT" > ibd_duplicates.tsv

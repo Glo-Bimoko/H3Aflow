@@ -20,6 +20,11 @@ args = parser.parse_args()
 
 sexcheck = pd.read_csv(args.sexcheck, sep=r"\s+")
 
+# IIDs from PLINK are read as int64 when sample IDs are numeric.
+# Cast both sides to str so the merge key types match.
+sexcheck["IID"] = sexcheck["IID"].astype(str).str.strip()
+sexcheck["FID"] = sexcheck["FID"].astype(str).str.strip()
+
 sex_info = pd.read_csv(args.sex_info, sep="\t", dtype=str)
 sex_info.columns = sex_info.columns.str.strip().str.lower()
 sex_info = sex_info.rename(columns={"sampleid": "IID"})
@@ -31,15 +36,15 @@ sex_info["COLLECTED_SEX"] = sex_info["sex"].map({"0": "Female", "1": "Male"}).fi
 # Map PLINK inferred sex: 1→Male, 2→Female, 0→Unknown
 sexcheck["INFERRED_SEX"] = sexcheck["SNPSEX"].map({1: "Male", 2: "Female", 0: "Unknown"})
 
-# Inferred F-statistic interpretation label
+# F-statistic interpretation label
 def f_label(f):
-    if pd.isna(f):    return "Unknown"
-    if f > 0.8:       return "Male"
-    if f < 0.2:       return "Female"
+    if pd.isna(f):  return "Unknown"
+    if f > 0.8:     return "Male"
+    if f < 0.2:     return "Female"
     return "Ambiguous"
 sexcheck["F_LABEL"] = sexcheck["F"].apply(f_label)
 
-merged = sexcheck.merge(sex_info[["IID","COLLECTED_SEX"]], on="IID", how="left")
+merged = sexcheck.merge(sex_info[["IID", "COLLECTED_SEX"]], on="IID", how="left")
 merged["COLLECTED_SEX"] = merged["COLLECTED_SEX"].fillna("Unknown")
 
 # Discordant = PLINK called a sex AND it disagrees with collected
@@ -52,10 +57,10 @@ merged["DISCORDANT"] = merged.apply(is_discordant, axis=1)
 
 merged.to_csv(args.out_annot, sep="\t", index=False)
 
-discord = merged[merged["DISCORDANT"]][["FID","IID","COLLECTED_SEX","INFERRED_SEX","F","STATUS"]]
+discord = merged[merged["DISCORDANT"]][["FID", "IID", "COLLECTED_SEX", "INFERRED_SEX", "F", "STATUS"]]
 discord.to_csv(args.out_discord, sep="\t", index=False)
 
 print(f"Total samples checked : {len(merged)}")
 print(f"Sex-discordant samples: {merged['DISCORDANT'].sum()}")
-print(f"PLINK STATUS=PROBLEM  : {(merged['STATUS']=='PROBLEM').sum()}")
-print(f"Ambiguous F-statistic : {(merged['F_LABEL']=='Ambiguous').sum()}")
+print(f"PLINK STATUS=PROBLEM  : {(merged['STATUS'] == 'PROBLEM').sum()}")
+print(f"Ambiguous F-statistic : {(merged['F_LABEL'] == 'Ambiguous').sum()}")
