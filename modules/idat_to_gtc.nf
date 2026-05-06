@@ -1,6 +1,6 @@
 process IDAT_TO_GTC {
     tag "$sample_id"
-    publishDir "${params.outdir}/gtc", mode: 'symlink', pattern: "*.gtc"
+    publishDir "${params.outdir}/gtc", mode: 'copy', pattern: "*.gtc"
 
     input:
     tuple val(sample_id), path(idat_dir), val(plate)
@@ -17,6 +17,6 @@ process IDAT_TO_GTC {
         --egt     "${egt}"                    \
         --idats   "${idat_dir}"               \
         --output  ${sample_id}.gtc            \
-        --gtc-dir "/home/eiko/Desktop/H3Aflow/results/gtc" 
+        --gtc-dir "${params.outdir}/gtc/"
     """
 }
