@@ -330,6 +330,79 @@ def check_gtc_health(path):
     return report
 
 
+# ── Bulk scan function ────────────────────────────────────────────────────────
+def bulk_scan_gtc_dir(gtc_dir):
+    """
+    Scan every *.gtc file in gtc_dir, delete any that fail the health check,
+    and print a summary to stdout.
+
+    This runs exactly once per pipeline invocation — whichever IDAT_TO_GTC task
+    wins the atomic .scan_done marker creation runs this; all others skip it.
+
+    Parameters
+    ----------
+    gtc_dir : Path   The published GTC output directory (e.g. results/gtc/).
+    """
+    gtc_files = sorted(gtc_dir.glob("*.gtc"))
+
+    if not gtc_files:
+        print(
+            "[convert_idat2gtc][bulk-scan] No GTC files found in " + str(gtc_dir) + " — nothing to scan.",
+            flush=True,
+        )
+        return
+
+    print(
+        "[convert_idat2gtc][bulk-scan] Scanning " + str(len(gtc_files)) +
+        " GTC file(s) in " + str(gtc_dir) + " ...",
+        flush=True,
+    )
+
+    healthy_count = 0
+    broken_count  = 0
+    deleted_count = 0
+
+    for gtc_path in gtc_files:
+        report = check_gtc_health(gtc_path)
+        if report.is_healthy:
+            healthy_count += 1
+        else:
+            broken_count += 1
+            failed_names = ", ".join(c.name for c in report.failed_mandatory)
+            print(
+                "[convert_idat2gtc][bulk-scan] BROKEN: " + gtc_path.name +
+                " (failed: " + failed_names + ") — deleting.",
+                flush=True,
+            )
+            # Log each failing check for full visibility
+            for c in report.failed_mandatory:
+                print(
+                    "  [FAIL] " + c.name + ": " + c.detail,
+                    flush=True,
+                )
+            try:
+                gtc_path.unlink()
+                deleted_count += 1
+                print(
+                    "[convert_idat2gtc][bulk-scan] Deleted: " + str(gtc_path),
+                    flush=True,
+                )
+            except OSError as exc:
+                print(
+                    "[convert_idat2gtc][bulk-scan] WARNING: Could not delete " +
+                    str(gtc_path) + ": " + str(exc),
+                    flush=True,
+                )
+
+    print(
+        "[convert_idat2gtc][bulk-scan] Complete — "
+        + str(healthy_count) + " healthy, "
+        + str(broken_count)  + " broken ("
+        + str(deleted_count) + " deleted).",
+        flush=True,
+    )
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument("--bpm",       required=True)
@@ -355,6 +428,31 @@ output = Path(args.output).resolve()   # desired final path e.g. SAMPLE_ID.gtc
 for f, label in [(bpm, "BPM"), (egt, "EGT"), (idats, "idat directory")]:
     if not f.exists():
         sys.exit("[convert_idat2gtc] ERROR: " + label + " not found: " + str(f))
+
+# ── Bulk scan: runs once across all parallel tasks ────────────────────────────
+# The first task to atomically create .scan_done wins and runs the bulk scan.
+# All other tasks see the file already exists and skip straight to their own
+# per-sample check below.
+# open(..., 'x') is an atomic exclusive-create on POSIX filesystems — only one
+# process succeeds even if many attempt it simultaneously.
+if args.gtc_dir:
+    gtc_dir_path   = Path(args.gtc_dir).resolve()
+    scan_done_flag = gtc_dir_path / ".scan_done"
+    gtc_dir_path.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(scan_done_flag, 'x') as _flag_fh:
+            pass  # we won the race — run the bulk scan
+        print(
+            "[convert_idat2gtc][bulk-scan] This task won the scan lock — "
+            "running bulk scan before per-sample conversion.",
+            flush=True,
+        )
+        bulk_scan_gtc_dir(gtc_dir_path)
+    except FileExistsError:
+        print(
+            "[convert_idat2gtc][bulk-scan] Scan already done (or in progress) — skipping.",
+            flush=True,
+        )
 
 # ── Skip-or-reconvert logic ───────────────────────────────────────────────────
 # Priority order:
