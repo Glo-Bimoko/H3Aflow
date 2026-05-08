@@ -1,6 +1,6 @@
 process IDAT_TO_GTC {
     tag "$sample_id"
-    publishDir "${params.outdir}/gtc", mode: 'copy', pattern: "*.gtc"
+    publishDir "${params.outdir}/gtc", mode: 'copy', pattern: "*.gtc", overwrite: true
 
     input:
     tuple val(sample_id), path(idat_dir), val(plate)
