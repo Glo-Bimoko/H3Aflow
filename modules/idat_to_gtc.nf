@@ -12,11 +12,12 @@ process IDAT_TO_GTC {
 
     script:
     """
+    cd "\$NXF_TASK_WORKDIR"
     python ${projectDir}/bin/convert_idat2gtc.py \
         --bpm     "${bpm}"                    \
         --egt     "${egt}"                    \
         --idats   "${idat_dir}"               \
-        --output  ${sample_id}.gtc            \
+        --output  "\$NXF_TASK_WORKDIR/${sample_id}.gtc"    \
         --gtc-dir "${params.outdir}/gtc/"
     """
 }

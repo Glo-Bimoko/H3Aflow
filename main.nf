@@ -102,7 +102,8 @@ workflow {
         ch_gtcs_by_plate,
         params.bpm,
         params.egt,
-        params.fasta
+        params.fasta,
+        PREP_INPUTS.out.sex_info
     )
 
     // -------------------------------------------------------------------------
