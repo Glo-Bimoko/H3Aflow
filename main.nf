@@ -72,7 +72,7 @@ workflow {
         .map { row ->
             // idat_dir kept as a plain string (val) so the full absolute
             // path is preserved and not reduced to a basename by Nextflow staging
-            tuple(row.sample_id, row.idat_dir, row.plate)
+            tuple(row.sample_id, row.idat_dir, row.barcode, row.position, row.plate)
         }
 
     ch_sex_info = PREP_INPUTS.out.sex_info

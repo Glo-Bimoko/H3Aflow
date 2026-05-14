@@ -546,7 +546,7 @@ MAX_ATTEMPTS = 3
 for attempt in range(1, MAX_ATTEMPTS + 1):
     attempt_tag = "[attempt " + str(attempt) + "/" + str(MAX_ATTEMPTS) + "]"
 
-    gtc_outdir = output.parent() / ("_gtc_tmp_" + output.stem)  # always absolute — anchored to Nextflow work dir
+    gtc_outdir = output.parent / ("_gtc_tmp_" + output.stem)  # always absolute — anchored to Nextflow work dir
     shutil.rmtree(str(gtc_outdir), ignore_errors=True)  # clean any leftover from prior attempt
     gtc_outdir.mkdir(parents=True, exist_ok=True)
 

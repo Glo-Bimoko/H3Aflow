@@ -198,6 +198,8 @@ for _, row in ss.iterrows():
         resolved_rows.append({
             "sample_id": sample_id,
             "idat_dir":  "MISSING",
+            "barcode":   barcode,
+            "position":  position,
             "plate":     plate,
         })
         continue
@@ -214,6 +216,8 @@ for _, row in ss.iterrows():
     resolved_rows.append({
         "sample_id": sample_id,
         "idat_dir":  str(dir_red.resolve()),
+        "barcode":   barcode,
+        "position":  position,
         "plate":     plate,
     })
 

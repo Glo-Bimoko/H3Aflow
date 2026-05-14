@@ -10,7 +10,8 @@ Usage:
         --egt       /path/to/clusters.egt           \
         --gtcs      gtc_list.txt                    \
         --fasta-ref /path/to/reference.fa           \
-        --outprefix Plate_1
+        --outprefix Plate_1                         \
+        [--sex-info /path/to/sex_info.tsv]
 
 Outputs:
     <outprefix>.bcf       normalised, sorted BCF (all samples for the plate)
@@ -20,21 +21,70 @@ Outputs:
 Requires:
     bcftools >= 1.11 with gtc2vcf plugin
     BCFTOOLS_PLUGINS env var pointing to the plugin directory
+
+Fix history
+-----------
+v2 (2026-05):
+  Step 3 – haploid recoding rewritten.
+
+  Root cause of the original bug:
+    The old code used SMPL_HOMREF / SMPL_HET / SMPL_HOMALT sample-level
+    filter expressions with --samples-file.  These expressions are evaluated
+    *before* bcftools applies the sample subset, so on bcftools <= 1.17 they
+    match the full-cohort genotype array, not the filtered male subset.  The
+    result is that --new-gt is applied to the wrong samples (or not at all),
+    leaving male chrX genotypes diploid.  PLINK then discards all male het
+    chrX calls as het-haploid -> F = -1 -> every male inferred as Female.
+
+v3 (2026-05):
+  Step 3 – haploid recoding rewritten again for bcftools 1.20 compatibility.
+
+  The v2 approach used the GT["samplename"] per-sample accessor syntax which
+  was only introduced in bcftools 1.21.  On bcftools 1.20 this produces
+  "Could not parse the index" and exits 255.
+
+  New approach (bcftools >= 1.11, tested on 1.20):
+    1. Extract sex-chromosome variants from the full BCF.
+    2. Split into two BCFs: males-only and females-only, using --samples-file.
+    3. On the males-only BCF, run three +setGT passes using cohort-level
+       GT="RR" / GT="AA" / GT="het" expressions.  These are safe here because
+       the BCF has already been subset to males, so every sample is a target.
+    4. Merge the recoded males BCF back with the females BCF using bcftools merge.
+    5. Concatenate the recoded sex-chr BCF with the original autosome BCF and
+       sort, then replace the diploid output BCF.
+
+  Plugin path discovery:
+    The bcftools standard plugins (+setGT etc.) live in a libexec/ directory
+    relative to the bcftools binary, which may differ from the user-supplied
+    BCFTOOLS_PLUGINS path (pointing to the gtc2vcf plugin directory).  We now
+    resolve the standard plugin dir dynamically and always append it to
+    BCFTOOLS_PLUGINS so both plugin sets are available.
 """
 
 import argparse
 import subprocess
 import sys
 from pathlib import Path
-import os 
+import os
 
 
+# ── CLI ────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument("--bpm",       required=True)
 parser.add_argument("--egt",       required=True)
-parser.add_argument("--gtcs",      required=True, help="File listing GTC paths, one per line")
+parser.add_argument("--gtcs",      required=True,
+                    help="File listing GTC paths, one per line")
 parser.add_argument("--fasta-ref", required=True)
 parser.add_argument("--outprefix", required=True)
+parser.add_argument(
+    "--sex-info",
+    default=None,
+    help=(
+        "TSV with columns: sampleid, sex  (1=Male, 0=Female). "
+        "When supplied, male X/Y genotypes are recoded to haploid so that "
+        "PLINK --check-sex produces valid F-statistics."
+    ),
+)
 args = parser.parse_args()
 
 bpm       = Path(args.bpm).resolve()
@@ -43,8 +93,110 @@ gtcs_list = Path(args.gtcs)
 fasta     = Path(args.fasta_ref).resolve()
 prefix    = args.outprefix
 
-bcf_out   = Path(f"{prefix}.bcf")
-tsv_out   = Path(f"{prefix}.tsv")
+bcf_out = Path(f"{prefix}.bcf")
+tsv_out = Path(f"{prefix}.tsv")
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def run(cmd, *, check=True, shell=False, env=None):
+    """Run a subprocess; print stdout+stderr; sys.exit on failure when check=True."""
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        shell=shell,
+        env=env,
+    )
+    if result.stdout:
+        print(result.stdout, flush=True)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, flush=True)
+    if check and result.returncode != 0:
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
+        sys.exit(
+            f"[convert_gtc2vcf] ERROR: command failed "
+            f"(exit {result.returncode}):\n  {cmd_str}"
+        )
+    return result
+
+
+def build_plugin_env():
+    """
+    Return a copy of os.environ where BCFTOOLS_PLUGINS contains both the
+    user-supplied plugin directory (for +gtc2vcf) and the standard bcftools
+    plugin directory (for +setGT, +fill-tags, etc.).
+    """
+    env = os.environ.copy()
+    extra_dirs = []
+
+    # Try to locate the standard bcftools plugin dir from the binary path
+    which_r = subprocess.run(["which", "bcftools"], capture_output=True, text=True)
+    if which_r.returncode == 0:
+        bcftools_bin = Path(which_r.stdout.strip()).resolve()
+        install_prefix = bcftools_bin.parent.parent   # e.g. /usr/local
+        for sub in ["libexec/bcftools", "lib/bcftools", "share/bcftools/plugins"]:
+            candidate = install_prefix / sub
+            if candidate.exists():
+                extra_dirs.append(str(candidate))
+                break
+
+    # Fallback: well-known install prefixes
+    for pfx in ["/usr/local", "/usr", "/opt/conda", "/opt/homebrew"]:
+        for sub in ["libexec/bcftools", "lib/bcftools", "share/bcftools/plugins"]:
+            candidate = Path(pfx) / sub
+            if candidate.exists() and str(candidate) not in extra_dirs:
+                extra_dirs.append(str(candidate))
+
+    current_parts = [p for p in env.get("BCFTOOLS_PLUGINS", "").split(":") if p]
+    all_parts = current_parts + [d for d in extra_dirs if d not in current_parts]
+    if all_parts:
+        env["BCFTOOLS_PLUGINS"] = ":".join(all_parts)
+
+    return env
+
+
+def detect_xy_regions(bcf_path):
+    """
+    Return a comma-separated region string for chrX and chrY as they appear
+    in the BCF header (handles both 'X'/'Y' and '23'/'24' naming).
+    """
+    r = subprocess.run(
+        ["bcftools", "view", "--header-only", str(bcf_path)],
+        capture_output=True, text=True,
+    )
+    header = r.stdout
+    regions = []
+    for x_name in ("X", "23"):
+        if (f"ID={x_name}," in header
+                or f"ID={x_name}\n" in header
+                or f"\t{x_name}\t" in header):
+            regions.append(x_name)
+            break
+    for y_name in ("Y", "24"):
+        if (f"ID={y_name}," in header
+                or f"ID={y_name}\n" in header
+                or f"\t{y_name}\t" in header):
+            regions.append(y_name)
+            break
+    # If neither naming convention is found, fall back to trying all four;
+    # bcftools will silently skip names that are not in the BCF.
+    return ",".join(regions) if regions else "X,Y,23,24"
+
+
+def get_auto_contigs(bcf_path, xy_set):
+    """Return a list of contig IDs from the BCF header that are not in xy_set."""
+    r = subprocess.run(
+        ["bcftools", "view", "--header-only", str(bcf_path)],
+        capture_output=True, text=True,
+    )
+    contigs = []
+    for line in r.stdout.splitlines():
+        if line.startswith("##contig") and "ID=" in line:
+            cid = line.split("ID=")[1].split(",")[0].rstrip(">")
+            if cid not in xy_set:
+                contigs.append(cid)
+    return contigs
+
 
 # ── Validate inputs ────────────────────────────────────────────────────────────
 for f, label in [(bpm, "BPM"), (egt, "EGT"), (fasta, "FASTA"), (gtcs_list, "GTC list")]:
@@ -61,67 +213,281 @@ print(f"[convert_gtc2vcf] BPM          : {bpm}", flush=True)
 print(f"[convert_gtc2vcf] EGT          : {egt}", flush=True)
 print(f"[convert_gtc2vcf] FASTA        : {fasta}", flush=True)
 
+
 # ── Step 1: GTC → unsorted BCF via bcftools +gtc2vcf ─────────────────────────
 unsorted_bcf = f"{prefix}_unsorted.bcf"
 
 gtc2vcf_cmd = (
     ["bcftools", "+gtc2vcf",
-     "--bpm",    str(bpm),
-     "--egt",    str(egt),
-     "--fasta-ref",  str(fasta),
-     "--output", unsorted_bcf,
+     "--bpm",         str(bpm),
+     "--egt",         str(egt),
+     "--fasta-ref",   str(fasta),
+     "--output",      unsorted_bcf,
      "--output-type", "b",
      "--no-version"]
     + gtc_files
 )
 
-print(f"\n[convert_gtc2vcf] Step 1: GTC → BCF", flush=True)
+print(f"\n[convert_gtc2vcf] Step 1: GTC -> BCF", flush=True)
 print(f"  {' '.join(gtc2vcf_cmd[:8])} ... [{len(gtc_files)} GTC files]", flush=True)
+run(gtc2vcf_cmd, env=os.environ)
 
-result = subprocess.run(gtc2vcf_cmd, capture_output=True, text=True, env=os.environ)
-if result.stdout:
-    print(result.stdout, flush=True)
-if result.stderr:
-    print(result.stderr, file=sys.stderr, flush=True)
-if result.returncode != 0:
-    sys.exit(f"[convert_gtc2vcf] ERROR: bcftools +gtc2vcf failed (exit {result.returncode})")
 
 # ── Step 2: Sort and index the BCF ────────────────────────────────────────────
 print(f"\n[convert_gtc2vcf] Step 2: Sort BCF", flush=True)
 
-sort_cmd = [
+run([
     "bcftools", "sort",
     "--output",      str(bcf_out),
     "--output-type", "b",
     "--temp-dir",    ".",
-    unsorted_bcf
-]
-
-result = subprocess.run(sort_cmd, capture_output=True, text=True)
-if result.stderr:
-    print(result.stderr, file=sys.stderr, flush=True)
-if result.returncode != 0:
-    sys.exit(f"[convert_gtc2vcf] ERROR: bcftools sort failed (exit {result.returncode})")
-
-# Remove unsorted intermediate
+    unsorted_bcf,
+])
 Path(unsorted_bcf).unlink(missing_ok=True)
-
-# Index
-index_cmd = ["bcftools", "index", str(bcf_out)]
-result = subprocess.run(index_cmd, capture_output=True, text=True)
-if result.returncode != 0:
-    sys.exit(f"[convert_gtc2vcf] ERROR: bcftools index failed (exit {result.returncode})")
-
+run(["bcftools", "index", str(bcf_out)])
 print(f"[convert_gtc2vcf] BCF written  : {bcf_out}", flush=True)
 
-# ── Step 3: Extract X/Y intensities to TSV ────────────────────────────────────
-print(f"\n[convert_gtc2vcf] Step 3: Extract XY intensities → TSV", flush=True)
 
-# Format string extracts per-sample NORMX and NORMY alongside site info
+# ── Step 3 (optional): Recode male X/Y genotypes to haploid ──────────────────
+if args.sex_info:
+    sex_info_path = Path(args.sex_info)
+    if not sex_info_path.exists():
+        print(
+            f"[convert_gtc2vcf] WARNING: --sex-info not found: {sex_info_path}. "
+            f"Skipping haploid recoding.",
+            file=sys.stderr, flush=True,
+        )
+    else:
+        print(f"\n[convert_gtc2vcf] Step 3: Recode male X/Y genotypes to haploid",
+              flush=True)
+
+        # --- get sample list from BCF ---
+        header_r = run(["bcftools", "query", "--list-samples", str(bcf_out)])
+        bcf_samples    = header_r.stdout.strip().splitlines()
+        bcf_sample_set = set(bcf_samples)
+
+        # --- parse sex_info and collect males present in this plate ---
+        males_in_plate = []
+        with open(sex_info_path) as fh:
+            fh.readline()  # skip header
+            for line in fh:
+                parts = line.strip().split("\t")
+                if len(parts) < 2:
+                    continue
+                sample_id, sex_code = parts[0].strip(), parts[1].strip()
+                if sex_code == "1" and sample_id in bcf_sample_set:
+                    males_in_plate.append(sample_id)
+
+        if not males_in_plate:
+            print(
+                "[convert_gtc2vcf] WARNING: No male samples found in this plate's BCF. "
+                "Skipping haploid recoding.",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            print(f"[convert_gtc2vcf] Males in this plate : {len(males_in_plate)}", flush=True)
+            print(f"[convert_gtc2vcf] Total samples       : {len(bcf_samples)}", flush=True)
+
+            plugin_env = build_plugin_env()
+            print(
+                f"[convert_gtc2vcf] BCFTOOLS_PLUGINS    : "
+                f"{plugin_env.get('BCFTOOLS_PLUGINS', '(not set)')}",
+                flush=True,
+            )
+
+            xy_regions = detect_xy_regions(bcf_out)
+            xy_set     = set(xy_regions.split(","))
+            print(f"[convert_gtc2vcf] Sex-chr regions     : {xy_regions}", flush=True)
+
+            # Temporary file paths
+            tmp_xy          = Path(f"{prefix}_xy.bcf")
+            tmp_xy_males    = Path(f"{prefix}_xy_males.bcf")
+            tmp_xy_females  = Path(f"{prefix}_xy_females.bcf")
+            tmp_xy_recoded  = Path(f"{prefix}_xy_recoded.bcf")
+            tmp_auto        = Path(f"{prefix}_autosomes.bcf")
+            haploid_bcf     = Path(f"{prefix}_haploid.bcf")
+            haploid_sorted  = Path(f"{prefix}_haploid_sorted.bcf")
+            males_file      = Path(f"{prefix}_males.txt")
+            females_file    = Path(f"{prefix}_females.txt")
+
+            recoding_ok = False
+            try:
+                # Step 3a: extract sex-chr sites only
+                run([
+                    "bcftools", "view",
+                    "--regions",     xy_regions,
+                    "--output-type", "b",
+                    "--output",      str(tmp_xy),
+                    str(bcf_out),
+                ], env=plugin_env)
+                run(["bcftools", "index", str(tmp_xy)], env=plugin_env)
+
+                # Step 3b: write males and females sample list files
+                males_file.write_text("\n".join(males_in_plate) + "\n")
+                females_in_plate = [s for s in bcf_samples if s not in set(males_in_plate)]
+                if females_in_plate:
+                    females_file.write_text("\n".join(females_in_plate) + "\n")
+
+                # Step 3c: extract males-only sex-chr BCF, recode to haploid.
+                # We subset to males first so GT="RR"/"AA"/"het" expressions
+                # target all samples in the subset (i.e. all males) without
+                # needing per-sample GT[] accessors (added only in bcftools 1.21).
+                # Three passes: hom-ref -> 0, hom-alt -> 1, het -> missing (.)
+                print("[convert_gtc2vcf] Running +setGT pipeline on males-only sex chrs...",
+                      flush=True)
+                setgt_pipe = (
+                    f"bcftools view --force-samples --samples-file {males_file} --output-type u {tmp_xy} "
+                    f"| bcftools +setGT --output-type u -- --target-gt q --new-gt 0 --include 'GT=\"RR\"' "
+                    f"| bcftools +setGT --output-type u -- --target-gt q --new-gt c:1 --include 'GT=\"AA\"' "
+                    f"| bcftools +setGT --output-type b --output {tmp_xy_males} -- --target-gt q --new-gt . --include 'GT=\"het\"'"
+                )
+                setgt_r = run(setgt_pipe, shell=True, env=plugin_env, check=False)
+
+                if setgt_r.returncode != 0:
+                    print(
+                        f"[convert_gtc2vcf] WARNING: +setGT failed "
+                        f"(exit {setgt_r.returncode}). Keeping diploid BCF.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    run(["bcftools", "index", str(tmp_xy_males)], env=plugin_env)
+
+                    # Step 3d: extract females-only sex-chr BCF (unmodified)
+                    # then merge males + females back into one BCF.
+                    if females_in_plate:
+                        run([
+                            "bcftools", "view",
+                            "--force-samples",
+                            "--samples-file", str(females_file),
+                            "--output-type",  "b",
+                            "--output",       str(tmp_xy_females),
+                            str(tmp_xy),
+                        ], env=plugin_env)
+                        run(["bcftools", "index", str(tmp_xy_females)], env=plugin_env)
+
+                        run([
+                            "bcftools", "merge",
+                            "--output-type", "b",
+                            "--output",      str(tmp_xy_recoded),
+                            str(tmp_xy_males),
+                            str(tmp_xy_females),
+                        ], env=plugin_env)
+                    else:
+                        # Plate is all-male — recoded males BCF is the full sex-chr BCF
+                        Path(str(tmp_xy_males)).rename(tmp_xy_recoded)
+
+                    run(["bcftools", "index", str(tmp_xy_recoded)], env=plugin_env)
+
+                    # Sanity-check: recoded BCF must be readable
+                    check_r = subprocess.run(
+                        ["bcftools", "view", "--header-only", str(tmp_xy_recoded)],
+                        capture_output=True, text=True,
+                    )
+                    if check_r.returncode != 0:
+                        print(
+                            "[convert_gtc2vcf] WARNING: Recoded sex-chr BCF is unreadable. "
+                            "Keeping diploid BCF.",
+                            file=sys.stderr, flush=True,
+                        )
+                    else:
+                        # Step 3e: extract autosomes from the original BCF
+                        auto_contigs = get_auto_contigs(bcf_out, xy_set)
+
+                        if auto_contigs:
+                            run([
+                                "bcftools", "view",
+                                "--regions",     ",".join(auto_contigs),
+                                "--output-type", "b",
+                                "--output",      str(tmp_auto),
+                                str(bcf_out),
+                            ], env=plugin_env)
+                            run(["bcftools", "index", str(tmp_auto)], env=plugin_env)
+
+                            # Step 3f: concat autosomes + recoded sex chrs
+                            run([
+                                "bcftools", "concat",
+                                "--allow-overlaps",
+                                "--output-type", "b",
+                                "--output",      str(haploid_bcf),
+                                str(tmp_auto),
+                                str(tmp_xy_recoded),
+                            ], env=plugin_env)
+                            tmp_auto.unlink(missing_ok=True)
+                            Path(f"{tmp_auto}.csi").unlink(missing_ok=True)
+                        else:
+                            # BCF is sex-chr only (already region-split upstream)
+                            tmp_xy_recoded.rename(haploid_bcf)
+
+                        # Sort (concat --allow-overlaps can leave chr boundary
+                        # records slightly out of order)
+                        run([
+                            "bcftools", "sort",
+                            "--output-type", "b",
+                            "--output",      str(haploid_sorted),
+                            "--temp-dir",    ".",
+                            str(haploid_bcf),
+                        ], env=plugin_env)
+                        haploid_bcf.unlink(missing_ok=True)
+
+                        # Replace the diploid BCF
+                        bcf_out.unlink(missing_ok=True)
+                        Path(f"{bcf_out}.csi").unlink(missing_ok=True)
+                        haploid_sorted.rename(bcf_out)
+                        run(["bcftools", "index", str(bcf_out)], env=plugin_env)
+
+                        recoding_ok = True
+                        print(
+                            f"[convert_gtc2vcf] Haploid recoding complete -> {bcf_out}",
+                            flush=True,
+                        )
+
+            except SystemExit as exc:
+                print(
+                    f"[convert_gtc2vcf] WARNING: Haploid recoding aborted: {exc}. "
+                    f"Keeping diploid BCF.",
+                    file=sys.stderr, flush=True,
+                )
+            finally:
+                for tmp in [tmp_xy, tmp_xy_males, tmp_xy_females, tmp_xy_recoded,
+                            tmp_auto, haploid_bcf, haploid_sorted]:
+                    if tmp.exists() and not recoding_ok:
+                        tmp.unlink(missing_ok=True)
+                for csi in [
+                    Path(f"{tmp_xy}.csi"),
+                    Path(f"{tmp_xy_males}.csi"),
+                    Path(f"{tmp_xy_females}.csi"),
+                    Path(f"{tmp_xy_recoded}.csi"),
+                    Path(f"{tmp_auto}.csi"),
+                ]:
+                    if csi.exists() and not recoding_ok:
+                        csi.unlink(missing_ok=True)
+                # Always clean up sample list files
+                for f in [males_file, females_file]:
+                    if f.exists():
+                        f.unlink(missing_ok=True)
+
+else:
+    print(
+        "\n[convert_gtc2vcf] Step 3: Skipped haploid recoding (no --sex-info supplied).",
+        flush=True,
+    )
+    print(
+        "[convert_gtc2vcf] NOTE: Without haploid recoding, PLINK --check-sex will",
+        flush=True,
+    )
+    print(
+        "[convert_gtc2vcf] report F=-1 for all males -> all inferred as Female.",
+        flush=True,
+    )
+
+
+# ── Step 4: Extract X/Y intensities to TSV ────────────────────────────────────
+print(f"\n[convert_gtc2vcf] Step 4: Extract XY intensities -> TSV", flush=True)
+
 query_cmd = [
     "bcftools", "query",
     "--format", "[%SAMPLE\t%CHROM\t%POS\t%REF\t%ALT\t%NORMX\t%NORMY\n]",
-    str(bcf_out)
+    str(bcf_out),
 ]
 
 with open(tsv_out, "w") as fh:
@@ -131,16 +497,14 @@ with open(tsv_out, "w") as fh:
 if result.stderr:
     print(result.stderr, file=sys.stderr, flush=True)
 if result.returncode != 0:
-    # TSV is nice-to-have; warn but don't fail the whole process
     print(
         f"[convert_gtc2vcf] WARNING: TSV extraction failed (exit {result.returncode}). "
         f"Downstream XY intensity QC will be skipped for this plate.",
-        file=sys.stderr, flush=True
+        file=sys.stderr, flush=True,
     )
-    # Write an empty TSV so Nextflow output pattern is satisfied
     with open(tsv_out, "w") as fh:
         fh.write("SAMPLE_ID\tCHR\tPOS\tREF\tALT\tNORMX\tNORMY\n")
 else:
     print(f"[convert_gtc2vcf] TSV written  : {tsv_out}", flush=True)
 
-print(f"\n[convert_gtc2vcf] Done — plate {prefix}", flush=True)
+print(f"\n[convert_gtc2vcf] Done -- plate {prefix}", flush=True)

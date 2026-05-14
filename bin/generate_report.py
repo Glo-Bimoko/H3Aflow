@@ -516,7 +516,7 @@ html = f"""<!DOCTYPE html>
 
 </main>
 
-<footer>idat2vcf-pipeline QC Report &nbsp;·&nbsp; {now}</footer>
+<footer>H3aFlow QC Report &nbsp;·&nbsp; {now}</footer>
 
 </body>
 </html>"""
