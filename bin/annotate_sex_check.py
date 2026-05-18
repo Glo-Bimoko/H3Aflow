@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 annotate_sex_check.py
 Merges PLINK --check-sex output with collected gender from the sex_info file.

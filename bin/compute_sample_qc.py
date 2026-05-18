@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 compute_sample_qc.py
 Reads PLINK .imiss and .het files, flags samples failing call rate or

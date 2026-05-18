@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 plot_pca.py
 ===========

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 convert_idat2gtc.py
 ===================

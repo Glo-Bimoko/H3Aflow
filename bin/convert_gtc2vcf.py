@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 convert_gtc2vcf.py
 ==================
@@ -59,6 +60,27 @@ v3 (2026-05):
     BCFTOOLS_PLUGINS path (pointing to the gtc2vcf plugin directory).  We now
     resolve the standard plugin dir dynamically and always append it to
     BCFTOOLS_PLUGINS so both plugin sets are available.
+
+v4 (2026-05):
+  Bug fix: +setGT was silently failing on CHPC Lengau because the standard
+  bcftools plugin dir was not being discovered correctly.
+
+  Root cause: on Lengau, `which bcftools` returns a module wrapper script
+  rather than the real binary, so the parent.parent heuristic pointed to
+  the wrong prefix and setGT.so was never found.  The +setGT pipe was run
+  with check=False, so the failure was swallowed and the diploid BCF was
+  kept — producing 821,396 het-haploid warnings in PLINK and invalidating
+  all F-statistics.
+
+  Fix:
+    1. build_plugin_env() now accepts an explicit BCFTOOLS_LIBEXEC override
+       via the BCFTOOLS_LIBEXEC environment variable (set in nextflow.config
+       for each profile).  This is tried first before any path discovery.
+    2. The known CHPC Lengau path is added as a hardcoded fallback so the
+       pipeline works on that cluster even without the env var.
+    3. The +setGT subprocess now uses check=True so any future plugin
+       failures abort loudly at GTC_TO_VCF rather than silently producing
+       wrong sex-check results downstream.
 """
 
 import argparse
@@ -125,27 +147,51 @@ def build_plugin_env():
     Return a copy of os.environ where BCFTOOLS_PLUGINS contains both the
     user-supplied plugin directory (for +gtc2vcf) and the standard bcftools
     plugin directory (for +setGT, +fill-tags, etc.).
+
+    Search order for the standard plugin dir:
+      1. BCFTOOLS_LIBEXEC env var (set explicitly in nextflow.config per profile)
+      2. Resolved from `which bcftools` → binary's real parent/parent/libexec
+      3. Hardcoded CHPC Lengau path for bcftools/1.20
+      4. Well-known install prefixes (/usr/local, /usr, /opt/conda, /opt/homebrew)
     """
     env = os.environ.copy()
     extra_dirs = []
 
-    # Try to locate the standard bcftools plugin dir from the binary path
-    which_r = subprocess.run(["which", "bcftools"], capture_output=True, text=True)
-    if which_r.returncode == 0:
-        bcftools_bin = Path(which_r.stdout.strip()).resolve()
-        install_prefix = bcftools_bin.parent.parent   # e.g. /usr/local
-        for sub in ["libexec/bcftools", "lib/bcftools", "share/bcftools/plugins"]:
-            candidate = install_prefix / sub
-            if candidate.exists():
-                extra_dirs.append(str(candidate))
-                break
+    # ── Priority 1: explicit override from nextflow.config ────────────────────
+    explicit = env.get("BCFTOOLS_LIBEXEC", "").strip()
+    if explicit and Path(explicit).exists():
+        extra_dirs.append(explicit)
+        print(f"[convert_gtc2vcf] Standard plugin dir (BCFTOOLS_LIBEXEC): {explicit}",
+              flush=True)
 
-    # Fallback: well-known install prefixes
+    # ── Priority 2: resolve from the real bcftools binary path ───────────────
+    if not extra_dirs:
+        which_r = subprocess.run(["which", "bcftools"], capture_output=True, text=True)
+        if which_r.returncode == 0:
+            # Follow symlinks so module wrapper scripts resolve to the real binary
+            bcftools_bin = Path(which_r.stdout.strip()).resolve()
+            install_prefix = bcftools_bin.parent.parent
+            for sub in ["libexec/bcftools", "lib/bcftools", "share/bcftools/plugins"]:
+                candidate = install_prefix / sub
+                if candidate.exists():
+                    extra_dirs.append(str(candidate))
+                    print(f"[convert_gtc2vcf] Standard plugin dir (auto-detected): {candidate}",
+                          flush=True)
+                    break
+
+    # ── Priority 3: hardcoded CHPC Lengau fallback ────────────────────────────
+    CHPC_LIBEXEC = "/apps/chpc/bio/bcftools/1.20/libexec/bcftools"
+    if Path(CHPC_LIBEXEC).exists() and CHPC_LIBEXEC not in extra_dirs:
+        extra_dirs.append(CHPC_LIBEXEC)
+        print(f"[convert_gtc2vcf] Standard plugin dir (CHPC fallback): {CHPC_LIBEXEC}",
+              flush=True)
+
+    # ── Priority 4: common install prefixes ───────────────────────────────────
     for pfx in ["/usr/local", "/usr", "/opt/conda", "/opt/homebrew"]:
         for sub in ["libexec/bcftools", "lib/bcftools", "share/bcftools/plugins"]:
-            candidate = Path(pfx) / sub
-            if candidate.exists() and str(candidate) not in extra_dirs:
-                extra_dirs.append(str(candidate))
+            candidate = str(Path(pfx) / sub)
+            if Path(candidate).exists() and candidate not in extra_dirs:
+                extra_dirs.append(candidate)
 
     current_parts = [p for p in env.get("BCFTOOLS_PLUGINS", "").split(":") if p]
     all_parts = current_parts + [d for d in extra_dirs if d not in current_parts]
@@ -335,111 +381,129 @@ if args.sex_info:
                 # Three passes: hom-ref -> 0, hom-alt -> 1, het -> missing (.)
                 print("[convert_gtc2vcf] Running +setGT pipeline on males-only sex chrs...",
                       flush=True)
+
+                # Preflight: verify +setGT is loadable before running the pipe.
+                # If the plugin is not found, bcftools exits non-zero and prints
+                # "Failed to open plugin".  Catch it here with a clear error
+                # message rather than a cryptic mid-pipe failure.
+                setgt_check = subprocess.run(
+                    ["bcftools", "plugin", "setGT"],
+                    capture_output=True, text=True, env=plugin_env,
+                )
+                plugin_missing = (
+                    setgt_check.returncode not in (0, 1)
+                    or "failed to open" in setgt_check.stderr.lower()
+                    or "no such file" in setgt_check.stderr.lower()
+                )
+                if plugin_missing:
+                    raise SystemExit(
+                        f"+setGT plugin not found. "
+                        f"BCFTOOLS_PLUGINS={plugin_env.get('BCFTOOLS_PLUGINS', '(unset)')}.\n"
+                        f"Set BCFTOOLS_LIBEXEC in your environment (or nextflow.config) to the "
+                        f"directory containing setGT.so.\n"
+                        f"On CHPC Lengau: export BCFTOOLS_LIBEXEC="
+                        f"/apps/chpc/bio/bcftools/1.20/libexec/bcftools"
+                    )
+                print("[convert_gtc2vcf] +setGT plugin verified OK.", flush=True)
+
                 setgt_pipe = (
                     f"bcftools view --force-samples --samples-file {males_file} --output-type u {tmp_xy} "
                     f"| bcftools +setGT --output-type u -- --target-gt q --new-gt 0 --include 'GT=\"RR\"' "
                     f"| bcftools +setGT --output-type u -- --target-gt q --new-gt c:1 --include 'GT=\"AA\"' "
                     f"| bcftools +setGT --output-type b --output {tmp_xy_males} -- --target-gt q --new-gt . --include 'GT=\"het\"'"
                 )
-                setgt_r = run(setgt_pipe, shell=True, env=plugin_env, check=False)
+                # check=True: abort loudly if the pipe fails rather than silently
+                # keeping the diploid BCF and producing invalid F-statistics.
+                run(setgt_pipe, shell=True, env=plugin_env, check=True)
+                run(["bcftools", "index", str(tmp_xy_males)], env=plugin_env)
 
-                if setgt_r.returncode != 0:
-                    print(
-                        f"[convert_gtc2vcf] WARNING: +setGT failed "
-                        f"(exit {setgt_r.returncode}). Keeping diploid BCF.",
-                        file=sys.stderr, flush=True,
-                    )
+                # Step 3d: extract females-only sex-chr BCF (unmodified)
+                # then merge males + females back into one BCF.
+                if females_in_plate:
+                    run([
+                        "bcftools", "view",
+                        "--force-samples",
+                        "--samples-file", str(females_file),
+                        "--output-type",  "b",
+                        "--output",       str(tmp_xy_females),
+                        str(tmp_xy),
+                    ], env=plugin_env)
+                    run(["bcftools", "index", str(tmp_xy_females)], env=plugin_env)
+
+                    run([
+                        "bcftools", "merge",
+                        "--output-type", "b",
+                        "--output",      str(tmp_xy_recoded),
+                        str(tmp_xy_males),
+                        str(tmp_xy_females),
+                    ], env=plugin_env)
                 else:
-                    run(["bcftools", "index", str(tmp_xy_males)], env=plugin_env)
+                    # Plate is all-male — recoded males BCF is the full sex-chr BCF
+                    Path(str(tmp_xy_males)).rename(tmp_xy_recoded)
 
-                    # Step 3d: extract females-only sex-chr BCF (unmodified)
-                    # then merge males + females back into one BCF.
-                    if females_in_plate:
-                        run([
-                            "bcftools", "view",
-                            "--force-samples",
-                            "--samples-file", str(females_file),
-                            "--output-type",  "b",
-                            "--output",       str(tmp_xy_females),
-                            str(tmp_xy),
-                        ], env=plugin_env)
-                        run(["bcftools", "index", str(tmp_xy_females)], env=plugin_env)
+                run(["bcftools", "index", str(tmp_xy_recoded)], env=plugin_env)
 
-                        run([
-                            "bcftools", "merge",
-                            "--output-type", "b",
-                            "--output",      str(tmp_xy_recoded),
-                            str(tmp_xy_males),
-                            str(tmp_xy_females),
-                        ], env=plugin_env)
-                    else:
-                        # Plate is all-male — recoded males BCF is the full sex-chr BCF
-                        Path(str(tmp_xy_males)).rename(tmp_xy_recoded)
-
-                    run(["bcftools", "index", str(tmp_xy_recoded)], env=plugin_env)
-
-                    # Sanity-check: recoded BCF must be readable
-                    check_r = subprocess.run(
-                        ["bcftools", "view", "--header-only", str(tmp_xy_recoded)],
-                        capture_output=True, text=True,
+                # Sanity-check: recoded BCF must be readable
+                check_r = subprocess.run(
+                    ["bcftools", "view", "--header-only", str(tmp_xy_recoded)],
+                    capture_output=True, text=True,
+                )
+                if check_r.returncode != 0:
+                    raise SystemExit(
+                        "Recoded sex-chr BCF is unreadable after +setGT — "
+                        "check bcftools stderr above for clues."
                     )
-                    if check_r.returncode != 0:
-                        print(
-                            "[convert_gtc2vcf] WARNING: Recoded sex-chr BCF is unreadable. "
-                            "Keeping diploid BCF.",
-                            file=sys.stderr, flush=True,
-                        )
-                    else:
-                        # Step 3e: extract autosomes from the original BCF
-                        auto_contigs = get_auto_contigs(bcf_out, xy_set)
 
-                        if auto_contigs:
-                            run([
-                                "bcftools", "view",
-                                "--regions",     ",".join(auto_contigs),
-                                "--output-type", "b",
-                                "--output",      str(tmp_auto),
-                                str(bcf_out),
-                            ], env=plugin_env)
-                            run(["bcftools", "index", str(tmp_auto)], env=plugin_env)
+                # Step 3e: extract autosomes from the original BCF
+                auto_contigs = get_auto_contigs(bcf_out, xy_set)
 
-                            # Step 3f: concat autosomes + recoded sex chrs
-                            run([
-                                "bcftools", "concat",
-                                "--allow-overlaps",
-                                "--output-type", "b",
-                                "--output",      str(haploid_bcf),
-                                str(tmp_auto),
-                                str(tmp_xy_recoded),
-                            ], env=plugin_env)
-                            tmp_auto.unlink(missing_ok=True)
-                            Path(f"{tmp_auto}.csi").unlink(missing_ok=True)
-                        else:
-                            # BCF is sex-chr only (already region-split upstream)
-                            tmp_xy_recoded.rename(haploid_bcf)
+                if auto_contigs:
+                    run([
+                        "bcftools", "view",
+                        "--regions",     ",".join(auto_contigs),
+                        "--output-type", "b",
+                        "--output",      str(tmp_auto),
+                        str(bcf_out),
+                    ], env=plugin_env)
+                    run(["bcftools", "index", str(tmp_auto)], env=plugin_env)
 
-                        # Sort (concat --allow-overlaps can leave chr boundary
-                        # records slightly out of order)
-                        run([
-                            "bcftools", "sort",
-                            "--output-type", "b",
-                            "--output",      str(haploid_sorted),
-                            "--temp-dir",    ".",
-                            str(haploid_bcf),
-                        ], env=plugin_env)
-                        haploid_bcf.unlink(missing_ok=True)
+                    # Step 3f: concat autosomes + recoded sex chrs
+                    run([
+                        "bcftools", "concat",
+                        "--allow-overlaps",
+                        "--output-type", "b",
+                        "--output",      str(haploid_bcf),
+                        str(tmp_auto),
+                        str(tmp_xy_recoded),
+                    ], env=plugin_env)
+                    tmp_auto.unlink(missing_ok=True)
+                    Path(f"{tmp_auto}.csi").unlink(missing_ok=True)
+                else:
+                    # BCF is sex-chr only (already region-split upstream)
+                    tmp_xy_recoded.rename(haploid_bcf)
 
-                        # Replace the diploid BCF
-                        bcf_out.unlink(missing_ok=True)
-                        Path(f"{bcf_out}.csi").unlink(missing_ok=True)
-                        haploid_sorted.rename(bcf_out)
-                        run(["bcftools", "index", str(bcf_out)], env=plugin_env)
+                # Sort (concat --allow-overlaps can leave chr boundary
+                # records slightly out of order)
+                run([
+                    "bcftools", "sort",
+                    "--output-type", "b",
+                    "--output",      str(haploid_sorted),
+                    "--temp-dir",    ".",
+                    str(haploid_bcf),
+                ], env=plugin_env)
+                haploid_bcf.unlink(missing_ok=True)
 
-                        recoding_ok = True
-                        print(
-                            f"[convert_gtc2vcf] Haploid recoding complete -> {bcf_out}",
-                            flush=True,
-                        )
+                # Replace the diploid BCF
+                bcf_out.unlink(missing_ok=True)
+                Path(f"{bcf_out}.csi").unlink(missing_ok=True)
+                haploid_sorted.rename(bcf_out)
+                run(["bcftools", "index", str(bcf_out)], env=plugin_env)
+
+                recoding_ok = True
+                print(
+                    f"[convert_gtc2vcf] Haploid recoding complete -> {bcf_out}",
+                    flush=True,
+                )
 
             except SystemExit as exc:
                 print(
