@@ -41,16 +41,23 @@ process CHECK_SEX {
     fi
 
     # ── Step 1: Recode sex_info to PLINK format ───────────────────────────────
-    # Delegated entirely to bin/make_sex_update.py to avoid any shell/Nextflow
-    # escaping issues with tabs and newlines in the output file.
+    # make_sex_update.py now writes FID=IID (matching --double-id convention).
     echo "Step 1: Recoding sex_info to PLINK format..." >> sex_check.log
     python3 ${sex_update_py} ${sex_info_path} plink_sex_update.txt
     N_SEX=\$(wc -l < plink_sex_update.txt)
     echo "  Sex entries to update: \${N_SEX}" >> sex_check.log
 
+    # Diagnostic: show first few lines of update file and FAM so FID mismatch is obvious in logs
+    echo "  plink_sex_update.txt (first 3 lines):" >> sex_check.log
+    head -3 plink_sex_update.txt >> sex_check.log 2>&1 || true
+    echo "  ${prefix}.fam (first 3 lines):" >> sex_check.log
+    head -3 ${prefix}.fam >> sex_check.log 2>&1 || true
+
     # ── Step 2: Split PAR from chrX ───────────────────────────────────────────
     # PAR1/PAR2 are diploid in both sexes; they bias male F toward 0 if kept.
     # --split-x b37 moves them to a separate XY contig.
+    # Note: VCF_TO_PLINK already runs --split-x, but we repeat it here as a
+    # safety net in case the merged cohort dataset lost the XY contig labeling.
     echo "Step 2: Splitting PAR from chrX (--split-x b37)..." >> sex_check.log
     CHR_NAME=\$(head -1 ${prefix}.bim | cut -f1)
     echo "  Chromosome name in BIM: \${CHR_NAME}" >> sex_check.log
@@ -85,10 +92,28 @@ process CHECK_SEX {
         --make-bed \\
         --out chrX_sexed >> sex_check.log 2>&1
 
-    N_MALES=\$(awk '\$3==1' chrX_sexed.fam | wc -l)
-    N_FEMALES=\$(awk '\$3==2' chrX_sexed.fam | wc -l)
+    # FAM sex is column 5 (not 3 — col 3 is paternal ID)
+    N_MALES=\$(awk '\$5==1' chrX_sexed.fam | wc -l)
+    N_FEMALES=\$(awk '\$5==2' chrX_sexed.fam | wc -l)
     echo "  Males in FAM   : \${N_MALES}" >> sex_check.log
     echo "  Females in FAM : \${N_FEMALES}" >> sex_check.log
+
+    # Guard: if sex update didn't take, the rest of the sex check is meaningless
+    if [ "\${N_MALES}" -eq 0 ] && [ "\${N_FEMALES}" -eq 0 ]; then
+        echo "" >> sex_check.log
+        echo "ERROR: Sex update failed — 0 males and 0 females in FAM after --update-sex." >> sex_check.log
+        echo "  This means FID values in plink_sex_update.txt do not match chrX_splitx.fam." >> sex_check.log
+        echo "  Check that VCF_TO_PLINK uses --double-id and make_sex_update.py writes FID=IID." >> sex_check.log
+        echo "  First 5 lines of chrX_splitx.fam:" >> sex_check.log
+        head -5 chrX_splitx.fam >> sex_check.log 2>&1 || true
+        echo "  First 5 lines of plink_sex_update.txt:" >> sex_check.log
+        head -5 plink_sex_update.txt >> sex_check.log 2>&1 || true
+        python3 ${placeholder_py} "Sex update failed — FID mismatch (see sex_check.log)"
+        # Write minimal valid output files so the pipeline doesn't crash downstream
+        printf 'FID\tIID\tPEDSEX\tSNPSEX\tSTATUS\tF\tCOLLECTED_SEX\tINFERRED_SEX\tDISCORDANT\n' > sexcheck.txt
+        printf 'FID\tIID\tCOLLECTED_SEX\tINFERRED_SEX\tF\tSTATUS\n' > sex_discordance.txt
+        exit 0
+    fi
 
     # ── Step 4: Identify het-haploid variants (preflight) ────────────────────
     echo "Step 4: Identifying het-haploid variants (preflight)..." >> sex_check.log
