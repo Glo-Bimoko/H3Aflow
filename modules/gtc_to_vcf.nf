@@ -19,8 +19,16 @@ process GTC_TO_VCF {
     // Sanitise plate name for use as filename (replace spaces/special chars)
     def safe_plate = plate.replaceAll(/[^A-Za-z0-9_\-]/, '_')
     """
-    # Ensure the BCFTOOLS_PLUGINS environment variable is set for the plugin to be found
-    export BCFTOOLS_PLUGINS=${projectDir}/bin/plugins/gtc2vcf
+    # ── Plugin paths ──────────────────────────────────────────────────────────
+    # APPEND the gtc2vcf plugin dir to whatever BCFTOOLS_PLUGINS is already set
+    # to by the Nextflow profile (e.g. the standard bcftools libexec dir added
+    # via env.BCFTOOLS_PLUGINS in nextflow.config).  Using += avoids clobbering
+    # the standard plugin dir that +setGT and +fill-tags live in.
+    export BCFTOOLS_PLUGINS=\${BCFTOOLS_PLUGINS:+\${BCFTOOLS_PLUGINS}:}${projectDir}/bin/plugins/gtc2vcf
+
+    # Forward the explicit libexec override so Python's build_plugin_env() can
+    # pick it up regardless of how the Nextflow profile propagates env vars.
+    export BCFTOOLS_LIBEXEC=\${BCFTOOLS_LIBEXEC:-}
 
     ls -1 *.gtc > gtc_list.txt
 
