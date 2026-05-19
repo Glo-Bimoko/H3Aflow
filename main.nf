@@ -194,6 +194,8 @@ workflow {
         SAMPLE_QC.out.qc_stats,
         IBD.out.genome,
         PCA.out.eigenvec,
-        ch_sex_info
+        ch_sex_info,
+        GENOTYPE_CONCORDANCE.out.concordance,
+        file(params.samplesheet)
     )
 }
