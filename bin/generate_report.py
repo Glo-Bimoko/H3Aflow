@@ -9,12 +9,14 @@ Reads all upstream QC outputs and writes:
   --out_summary  cohort_summary.tsv    (one-row key-value table)
 
 Inputs (all from prior pipeline stages):
-  --sexcheck    sex_check.sexcheck          (PLINK --check-sex; annotated by annotate_sex_check.py)
-  --xy_tsv      xy_intensity.tsv           (extract_xy_intensity.py)
-  --qc_stats    sample_qc_stats.tsv        (compute_sample_qc.py)
-  --genome      ibd.genome                 (PLINK --genome)
-  --eigenvec    pca.eigenvec               (PLINK2 --pca)
-  --sex_info    sex_info.tsv               (raw collected sex)
+  --sexcheck      sex_check.sexcheck          (PLINK --check-sex; annotated by annotate_sex_check.py)
+  --xy_tsv        xy_intensity.tsv           (extract_xy_intensity.py)
+  --qc_stats      sample_qc_stats.tsv        (compute_sample_qc.py)
+  --genome        ibd.genome                 (PLINK --genome)
+  --eigenvec      pca.eigenvec               (PLINK2 --pca)
+  --sex_info      sex_info.tsv               (raw collected sex)
+  --concordance   pairwise_concordance.tsv   (pairwise_concordance.py) [optional]
+  --samplesheet   samplesheet.csv            (original samplesheet with Plate/Well) [optional]
 """
 
 import argparse
@@ -30,22 +32,34 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Generate HTML QC report")
-parser.add_argument("--sexcheck",    required=True)
-parser.add_argument("--xy_tsv",     required=True)
-parser.add_argument("--qc_stats",   required=True)
-parser.add_argument("--genome",     required=True)
-parser.add_argument("--eigenvec",   required=True)
-parser.add_argument("--sex_info",   required=True)
-parser.add_argument("--out_html",   required=True)
-parser.add_argument("--out_flagged",required=True)
-parser.add_argument("--out_summary",required=True)
+parser.add_argument("--sexcheck",     required=True)
+parser.add_argument("--xy_tsv",      required=True)
+parser.add_argument("--qc_stats",    required=True)
+parser.add_argument("--genome",      required=True)
+parser.add_argument("--eigenvec",    required=True)
+parser.add_argument("--sex_info",    required=True)
+parser.add_argument("--out_html",    required=True)
+parser.add_argument("--out_flagged", required=True)
+parser.add_argument("--out_summary", required=True)
+# NEW: concordance and samplesheet (optional)
+parser.add_argument("--concordance", default=None,
+                    help="pairwise_concordance.tsv from pairwise_concordance.py")
+parser.add_argument("--samplesheet", default=None,
+                    help="Original samplesheet CSV with Plate Number and Well Position columns")
 # Optional thresholds (match nextflow.config defaults)
-parser.add_argument("--pi_hat",     type=float, default=0.1875)
-parser.add_argument("--mind",       type=float, default=0.05)
-parser.add_argument("--het_sd",     type=float, default=3.0)
+parser.add_argument("--pi_hat",              type=float, default=0.1875)
+parser.add_argument("--mind",                type=float, default=0.05)
+parser.add_argument("--het_sd",              type=float, default=3.0)
+parser.add_argument("--concordance_warn",    type=float, default=84.0,
+                    help="Concordance %% above which a pair is included in the report (default: 84)")
+parser.add_argument("--concordance_flag",    type=float, default=99.0,
+                    help="Concordance %% above which a pair is flagged as likely duplicate (default: 99)")
 args = parser.parse_args()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -76,9 +90,6 @@ n_pass_any   = (~qc["FAIL_ANY"]).sum()
 sexcheck = pd.read_csv(args.sexcheck, sep=r"\s+")
 sexcheck["IID"] = sexcheck["IID"].astype(str).str.strip()
 
-# annotate_sex_check.py already adds COLLECTED_SEX, INFERRED_SEX, DISCORDANT.
-# Only fall back to merging from sex_info if the column is genuinely absent
-# (e.g. raw PLINK output was passed instead of the annotated file).
 if "COLLECTED_SEX" not in sexcheck.columns:
     sexcheck["INFERRED_SEX"] = sexcheck["SNPSEX"].map({1: "Male", 2: "Female", 0: "Unknown"})
     sexcheck = sexcheck.merge(sex_info[["IID","COLLECTED_SEX"]], on="IID", how="left")
@@ -119,7 +130,6 @@ evec = pd.read_csv(args.eigenvec, sep=r"\s+", comment=None)
 evec.columns = evec.columns.str.lstrip("#")
 evec["IID"] = evec["IID"].astype(str).str.strip()
 
-# PCA outliers (>6 SD on PC1/PC2)
 for col in ["PC1","PC2"]:
     if col in evec.columns:
         m, s = evec[col].mean(), evec[col].std()
@@ -130,6 +140,56 @@ evec["PCA_OUTLIER"] = (
 )
 n_pca_outliers = int(evec["PCA_OUTLIER"].sum())
 
+# ── Samplesheet (optional) ────────────────────────────────────────────────────
+samplesheet = None
+has_plate_info = False
+if args.samplesheet and os.path.exists(args.samplesheet):
+    try:
+        samplesheet = pd.read_csv(args.samplesheet)
+        samplesheet.columns = samplesheet.columns.str.strip().str.lower().str.replace(" ", "_")
+        # Normalise common column name variants
+        col_renames = {}
+        for c in samplesheet.columns:
+            if "sample" in c and "id" in c:       col_renames[c] = "sample_id"
+            elif "plate" in c:                     col_renames[c] = "plate"
+            elif "well" in c:                      col_renames[c] = "well"
+            elif "barcode" in c:                   col_renames[c] = "barcode"
+        samplesheet = samplesheet.rename(columns=col_renames)
+        samplesheet["sample_id"] = samplesheet["sample_id"].astype(str).str.strip()
+        has_plate_info = ("plate" in samplesheet.columns and "well" in samplesheet.columns)
+        print(f"[generate_report] Samplesheet loaded: {len(samplesheet)} rows, plate_info={has_plate_info}", flush=True)
+    except Exception as e:
+        print(f"[generate_report] Warning: could not load samplesheet: {e}", flush=True)
+
+# ── Concordance (optional) ────────────────────────────────────────────────────
+concordance_df = None
+concordance_warn_pairs = None
+concordance_flag_pairs = None
+n_warn_pairs = 0
+n_flag_pairs = 0
+
+if args.concordance and os.path.exists(args.concordance):
+    try:
+        concordance_df = pd.read_csv(args.concordance, sep="\t")
+        concordance_df["SAMPLE_A"] = concordance_df["SAMPLE_A"].astype(str).str.strip()
+        concordance_df["SAMPLE_B"] = concordance_df["SAMPLE_B"].astype(str).str.strip()
+        # Drop pairs where concordance is NaN
+        concordance_df = concordance_df.dropna(subset=["CONCORDANCE_PCT"])
+        # Pairs above the warning threshold (84%)
+        concordance_warn_pairs = concordance_df[
+            concordance_df["CONCORDANCE_PCT"] >= args.concordance_warn
+        ].sort_values("CONCORDANCE_PCT", ascending=False).copy()
+        # Pairs above the duplicate-flag threshold (99%)
+        concordance_flag_pairs = concordance_df[
+            concordance_df["CONCORDANCE_PCT"] >= args.concordance_flag
+        ].sort_values("CONCORDANCE_PCT", ascending=False).copy()
+        n_warn_pairs = len(concordance_warn_pairs)
+        n_flag_pairs = len(concordance_flag_pairs)
+        print(f"[generate_report] Concordance: {len(concordance_df):,} pairs loaded, "
+              f"{n_warn_pairs} ≥{args.concordance_warn}%, {n_flag_pairs} ≥{args.concordance_flag}%", flush=True)
+    except Exception as e:
+        print(f"[generate_report] Warning: could not load concordance file: {e}", flush=True)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 2.  BUILD FLAGGED SAMPLES TABLE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -138,16 +198,13 @@ print("[generate_report] Building flagged samples list …", flush=True)
 
 flag_records = []
 
-# Sample QC failures
 for _, row in qc[qc["FAIL_ANY"]].iterrows():
     flag_records.append({"IID": str(row["IID"]), "FLAG": row["FAIL_REASON"], "SOURCE": "SAMPLE_QC"})
 
-# Sex discordance
 if "DISCORDANT" in sexcheck.columns:
     for _, row in sexcheck[sexcheck["DISCORDANT"]].iterrows():
         flag_records.append({"IID": str(row["IID"]), "FLAG": "SEX_DISCORDANT", "SOURCE": "SEX_CHECK"})
 
-# IBD duplicates — flag IID2 in each pair
 if len(flagged_ibd) and "IID2" in flagged_ibd.columns:
     for _, row in flagged_ibd.iterrows():
         flag_records.append({
@@ -156,13 +213,20 @@ if len(flagged_ibd) and "IID2" in flagged_ibd.columns:
             "SOURCE": "IBD",
         })
 
-# PCA outliers
 for iid in evec.loc[evec["PCA_OUTLIER"], "IID"].tolist():
     flag_records.append({"IID": str(iid), "FLAG": "PCA_OUTLIER", "SOURCE": "PCA"})
 
+# Concordance duplicates → flag both samples in each pair
+if concordance_flag_pairs is not None and len(concordance_flag_pairs):
+    flagged_conc_iids = set()
+    for _, row in concordance_flag_pairs.iterrows():
+        flagged_conc_iids.add(str(row["SAMPLE_A"]))
+        flagged_conc_iids.add(str(row["SAMPLE_B"]))
+    for iid in flagged_conc_iids:
+        flag_records.append({"IID": iid, "FLAG": "CONCORDANCE_DUPLICATE", "SOURCE": "CONCORDANCE"})
+
 flagged_df = pd.DataFrame(flag_records) if flag_records else pd.DataFrame(columns=["IID","FLAG","SOURCE"])
 
-# Collapse multiple flags per sample
 if len(flagged_df):
     flagged_agg = (
         flagged_df.groupby("IID")
@@ -181,16 +245,18 @@ print(f"[generate_report] Flagged samples: {len(flagged_agg)} → {args.out_flag
 # ══════════════════════════════════════════════════════════════════════════════
 
 summary_rows = [
-    ("Total samples",              total_samples),
-    ("Samples passing call-rate QC", int(n_pass_mind)),
-    ("Samples failing call-rate QC", int(n_fail_mind)),
+    ("Total samples",                  total_samples),
+    ("Samples passing call-rate QC",   int(n_pass_mind)),
+    ("Samples failing call-rate QC",   int(n_fail_mind)),
     ("Samples failing heterozygosity QC", int(n_fail_het)),
-    ("Samples failing ANY QC",     int(n_fail_any)),
-    ("Sex-discordant samples",     n_sex_discord),
-    ("PLINK sex STATUS=PROBLEM",   n_sex_problem),
-    ("IBD pairs flagged",          n_ibd_pairs),
-    ("  of which duplicates/MZ",   n_ibd_dup),
-    ("PCA outliers (>6 SD)",       n_pca_outliers),
+    ("Samples failing ANY QC",         int(n_fail_any)),
+    ("Sex-discordant samples",         n_sex_discord),
+    ("PLINK sex STATUS=PROBLEM",       n_sex_problem),
+    ("IBD pairs flagged",              n_ibd_pairs),
+    ("  of which duplicates/MZ",       n_ibd_dup),
+    ("PCA outliers (>6 SD)",           n_pca_outliers),
+    (f"Concordance pairs ≥{args.concordance_warn}%", n_warn_pairs),
+    (f"Concordance pairs ≥{args.concordance_flag}% (likely duplicates)", n_flag_pairs),
     ("Total uniquely flagged samples", len(flagged_agg)),
 ]
 
@@ -247,8 +313,6 @@ fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 fig.suptitle("Sex Check – chrX F-Statistic", fontsize=12, fontweight="bold")
 
 ax = axes[0]
-# COLLECTED_SEX is already on sexcheck (from annotate_sex_check.py).
-# Use it directly — no merge needed.
 for sex, grp in sexcheck.groupby("COLLECTED_SEX"):
     ax.hist(grp["F"].dropna(), bins=50, alpha=0.65,
             color=SEX_PALETTE.get(sex, "#9E9E9E"), label=sex,
@@ -344,8 +408,171 @@ for panel_idx, (pc_a, pc_b) in enumerate([("PC1","PC2"), ("PC1","PC3")]):
 plt.tight_layout()
 plot_pca_b64 = fig_to_b64(fig)
 
+# ── Plot E: Concordance distribution ─────────────────────────────────────────
+plot_concordance_b64 = None
+plate_layout_b64s = {}   # plate_name → b64 png
+
+if concordance_df is not None and len(concordance_df):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    fig.suptitle("Pairwise Genotype Concordance Distribution", fontsize=12, fontweight="bold")
+
+    ax.hist(concordance_df["CONCORDANCE_PCT"], bins=80, color="#455A64",
+            edgecolor="white", linewidth=0.3)
+    ax.axvline(args.concordance_warn, color="#F57F17", linestyle="--", linewidth=1.5,
+               label=f"Report threshold ({args.concordance_warn}%)")
+    ax.axvline(args.concordance_flag, color="#C62828", linestyle="--", linewidth=1.5,
+               label=f"Duplicate flag ({args.concordance_flag}%)")
+    ax.set_xlabel("Concordance (%)", fontsize=10)
+    ax.set_ylabel("Pairs", fontsize=10)
+    ax.set_title("All pairwise concordance values", fontsize=10)
+    ax.legend(fontsize=9)
+    ax.grid(True, linewidth=0.4, alpha=0.5)
+    plt.tight_layout()
+    plot_concordance_b64 = fig_to_b64(fig)
+
+# ── Plot F: Plate layout heatmaps ────────────────────────────────────────────
+def well_to_row_col(well_str):
+    """Convert well like 'A01' or 'A1' to (row_idx 0-7, col_idx 0-11) for a 96-well plate."""
+    well_str = str(well_str).strip().upper()
+    if not well_str or well_str in ("NAN", ""):
+        return None, None
+    row_letter = well_str[0]
+    try:
+        col_num = int(well_str[1:])
+    except ValueError:
+        return None, None
+    row_idx = ord(row_letter) - ord('A')
+    col_idx = col_num - 1
+    if 0 <= row_idx < 8 and 0 <= col_idx < 12:
+        return row_idx, col_idx
+    return None, None
+
+if has_plate_info and samplesheet is not None and concordance_warn_pairs is not None:
+    # Build a per-sample max concordance score (highest similarity to any other sample)
+    # Only considering pairs above the warn threshold
+    sample_max_conc = {}
+    sample_conc_partner = {}
+    if len(concordance_warn_pairs):
+        for _, row in concordance_warn_pairs.iterrows():
+            sa, sb, pct = str(row["SAMPLE_A"]), str(row["SAMPLE_B"]), row["CONCORDANCE_PCT"]
+            if sa not in sample_max_conc or pct > sample_max_conc[sa]:
+                sample_max_conc[sa] = pct
+                sample_conc_partner[sa] = sb
+            if sb not in sample_max_conc or pct > sample_max_conc[sb]:
+                sample_max_conc[sb] = pct
+                sample_conc_partner[sb] = sa
+
+    plates = samplesheet["plate"].dropna().unique()
+    for plate_name in sorted(plates):
+        plate_samples = samplesheet[samplesheet["plate"] == plate_name].copy()
+        plate_samples["sample_id"] = plate_samples["sample_id"].astype(str).str.strip()
+
+        # 96-well grid: rows A-H (0-7), cols 1-12 (0-11)
+        grid_conc  = np.full((8, 12), np.nan)
+        grid_label = np.full((8, 12), "", dtype=object)
+        grid_is_dup = np.zeros((8, 12), dtype=bool)
+
+        for _, srow in plate_samples.iterrows():
+            r, c = well_to_row_col(srow.get("well", ""))
+            if r is None:
+                continue
+            sid = str(srow["sample_id"])
+            max_pct = sample_max_conc.get(sid, np.nan)
+            grid_conc[r, c]  = max_pct if not np.isnan(max_pct) else 0.0
+            grid_label[r, c] = sid
+            grid_is_dup[r, c] = max_pct >= args.concordance_flag if not np.isnan(max_pct) else False
+
+        # Only plot if any sample has data
+        valid_sids = set(plate_samples["sample_id"].tolist())
+        any_data = any(sid in sample_max_conc or sid in {str(s) for s in plate_samples["sample_id"]}
+                       for sid in valid_sids)
+
+        fig, ax = plt.subplots(figsize=(14, 6))
+        fig.suptitle(f"Plate Layout – {plate_name}\nMax pairwise concordance per well (≥{args.concordance_warn}% shown)",
+                     fontsize=11, fontweight="bold")
+
+        # Background: grey for empty, colour scale for occupied
+        cmap = plt.cm.YlOrRd
+        norm = Normalize(vmin=args.concordance_warn, vmax=100)
+
+        for r in range(8):
+            for c in range(12):
+                row_letter = chr(ord('A') + r)
+                col_num    = c + 1
+                well_id    = f"{row_letter}{col_num:02d}"
+
+                # Check if this well is occupied
+                match = plate_samples[plate_samples["well"].astype(str).str.strip().str.upper() == well_id]
+                if len(match) == 0:
+                    # Empty well
+                    rect = mpatches.FancyBboxPatch((c+0.05, r+0.05), 0.9, 0.9,
+                                                   boxstyle="round,pad=0.05",
+                                                   facecolor="#ECEFF1", edgecolor="#CFD8DC",
+                                                   linewidth=0.5)
+                    ax.add_patch(rect)
+                else:
+                    pct = grid_conc[r, c]
+                    is_dup = grid_is_dup[r, c]
+
+                    if pct >= args.concordance_warn:
+                        face_color = cmap(norm(pct))
+                        edge_color = "#B71C1C" if is_dup else "#78909C"
+                        edge_lw    = 2.5 if is_dup else 0.8
+                    else:
+                        face_color = "#E8F5E9"   # clean green — below threshold
+                        edge_color = "#A5D6A7"
+                        edge_lw    = 0.5
+
+                    rect = mpatches.FancyBboxPatch((c+0.05, r+0.05), 0.9, 0.9,
+                                                   boxstyle="round,pad=0.05",
+                                                   facecolor=face_color,
+                                                   edgecolor=edge_color,
+                                                   linewidth=edge_lw)
+                    ax.add_patch(rect)
+
+                    # Sample ID label (truncated)
+                    sid = grid_label[r, c]
+                    label_text = sid[-6:] if len(sid) > 6 else sid
+                    pct_text   = f"{pct:.1f}%" if pct >= args.concordance_warn else ""
+                    ax.text(c + 0.5, r + 0.62, label_text,
+                            ha="center", va="center", fontsize=5.5,
+                            color="#212121", fontweight="bold" if is_dup else "normal")
+                    if pct_text:
+                        ax.text(c + 0.5, r + 0.32, pct_text,
+                                ha="center", va="center", fontsize=5,
+                                color="#B71C1C" if is_dup else "#5D4037")
+
+        # Axes
+        ax.set_xlim(0, 12)
+        ax.set_ylim(0, 8)
+        ax.set_xticks([c + 0.5 for c in range(12)])
+        ax.set_xticklabels([str(i+1) for i in range(12)], fontsize=9)
+        ax.set_yticks([r + 0.5 for r in range(8)])
+        ax.set_yticklabels([chr(ord('A')+r) for r in range(8)], fontsize=9)
+        ax.invert_yaxis()
+        ax.set_aspect("equal")
+        ax.set_xlabel("Column", fontsize=10)
+        ax.set_ylabel("Row", fontsize=10)
+
+        # Colourbar
+        sm = ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.02)
+        cbar.set_label("Max concordance with any other sample (%)", fontsize=9)
+
+        # Legend patches
+        clean_patch = mpatches.Patch(facecolor="#E8F5E9", edgecolor="#A5D6A7", label=f"< {args.concordance_warn}% (clean)")
+        warn_patch  = mpatches.Patch(facecolor=cmap(norm(90)), edgecolor="#78909C", label=f"≥ {args.concordance_warn}% (warn)")
+        dup_patch   = mpatches.Patch(facecolor=cmap(norm(99.5)), edgecolor="#B71C1C", linewidth=2.5, label=f"≥ {args.concordance_flag}% (DUPLICATE)")
+        empty_patch = mpatches.Patch(facecolor="#ECEFF1", edgecolor="#CFD8DC", label="Empty well")
+        ax.legend(handles=[clean_patch, warn_patch, dup_patch, empty_patch],
+                  loc="upper right", fontsize=8, bbox_to_anchor=(1.38, 1.0))
+
+        plt.tight_layout()
+        plate_layout_b64s[plate_name] = fig_to_b64(fig)
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 5.  BUILD HTML
+# 5.  BUILD HTML HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 print("[generate_report] Building HTML …", flush=True)
@@ -380,7 +607,185 @@ def flagged_table_html(df, max_rows=500):
       <tbody>{body}</tbody>
     </table>"""
 
+def concordance_table_html(df, flag_threshold, max_rows=200):
+    """Render concordance pairs table with red highlights for duplicates."""
+    if df is None or len(df) == 0:
+        return ""
+    truncated = len(df) > max_rows
+    display = df.head(max_rows)
+    header = "<tr><th>Sample A</th><th>Sample B</th><th>SNPs Called</th><th>SNPs Matched</th><th>Concordance %</th></tr>"
+    body = ""
+    for _, row in display.iterrows():
+        pct = row["CONCORDANCE_PCT"]
+        is_dup = pct >= flag_threshold
+        row_style = ' style="background:#FFEBEE;"' if is_dup else ""
+        flag_icon = " 🔴" if is_dup else ""
+        body += (f"<tr{row_style}>"
+                 f"<td>{row['SAMPLE_A']}</td>"
+                 f"<td>{row['SAMPLE_B']}</td>"
+                 f"<td>{int(row['N_CALLED']):,}</td>"
+                 f"<td>{int(row['N_MATCH']):,}</td>"
+                 f"<td><strong>{pct:.2f}%{flag_icon}</strong></td>"
+                 f"</tr>\n")
+    note = f"<p><em>Showing first {max_rows} of {len(df)} pairs.</em></p>" if truncated else ""
+    return note + f"""
+    <table class="data-table">
+      <thead>{header}</thead>
+      <tbody>{body}</tbody>
+    </table>"""
+
+def contamination_table_html(concordance_flag_pairs, samplesheet, flag_threshold):
+    """
+    Table of contaminated/duplicate samples (those in pairs >= flag_threshold).
+    Shows sample ID, plate, well, and which sample(s) it's duplicated with.
+    """
+    if concordance_flag_pairs is None or len(concordance_flag_pairs) == 0:
+        return "<p class='ok'>✓ No contaminated/duplicate samples detected (no pairs ≥ {:.0f}%).</p>".format(flag_threshold)
+
+    # Build lookup: sample_id → plate, well
+    lookup = {}
+    if samplesheet is not None and has_plate_info:
+        for _, srow in samplesheet.iterrows():
+            sid = str(srow["sample_id"]).strip()
+            lookup[sid] = {
+                "plate": str(srow.get("plate", "N/A")),
+                "well":  str(srow.get("well",  "N/A")),
+            }
+
+    # Collect all flagged samples and their duplicate partners
+    dup_info = {}   # sample_id → {partners, max_conc, plate, well}
+    for _, row in concordance_flag_pairs.iterrows():
+        sa, sb, pct = str(row["SAMPLE_A"]), str(row["SAMPLE_B"]), row["CONCORDANCE_PCT"]
+        for primary, partner in [(sa, sb), (sb, sa)]:
+            if primary not in dup_info:
+                dup_info[primary] = {"partners": [], "max_conc": 0.0,
+                                     "plate": lookup.get(primary, {}).get("plate", "N/A"),
+                                     "well":  lookup.get(primary, {}).get("well",  "N/A")}
+            dup_info[primary]["partners"].append(f"{partner} ({pct:.2f}%)")
+            dup_info[primary]["max_conc"] = max(dup_info[primary]["max_conc"], pct)
+
+    rows_html = ""
+    for sid, info in sorted(dup_info.items(), key=lambda x: -x[1]["max_conc"]):
+        partners_str = "; ".join(info["partners"])
+        rows_html += (f"<tr style='background:#FFEBEE;'>"
+                      f"<td><strong>{sid}</strong></td>"
+                      f"<td>{info['plate']}</td>"
+                      f"<td>{info['well']}</td>"
+                      f"<td>{info['max_conc']:.2f}%</td>"
+                      f"<td>{partners_str}</td>"
+                      f"</tr>\n")
+
+    return f"""
+    <table class="data-table">
+      <thead><tr>
+        <th>Sample ID</th><th>Plate</th><th>Well</th>
+        <th>Max Concordance</th><th>Duplicate Partner(s)</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6.  BUILD CONCORDANCE SECTION HTML
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_concordance_section():
+    if concordance_df is None:
+        return ""   # no concordance file provided, skip section entirely
+
+    # --- Summary stats block ---
+    total_pairs = len(concordance_df)
+    section = f"""
+<div class="card" id="concordance">
+  <div class="card-header"><h2>🔗 Genotype Concordance – Sample Similarity</h2></div>
+  <div class="card-body">
+    <p>
+      Total pairs evaluated: <strong>{total_pairs:,}</strong>
+      &nbsp;|&nbsp; Pairs ≥ {args.concordance_warn}%: <strong>{n_warn_pairs}</strong>
+      &nbsp;|&nbsp; Likely duplicates (≥ {args.concordance_flag}%): <strong style="color:#C62828">{n_flag_pairs}</strong>
+    </p>
+    <p style="margin-top:6px; font-size:13px; color:#546E7A;">
+      <em>Unrelated samples from a shared-ancestry population typically share 50–65% genotypes.
+      Pairs above {args.concordance_warn}% are shown below. Pairs ≥ {args.concordance_flag}%
+      (highlighted in red 🔴) are likely duplicate samples or identical twins.</em>
+    </p>
+"""
+
+    # --- Distribution plot ---
+    if plot_concordance_b64:
+        section += f'    <img class="plot-img" src="data:image/png;base64,{plot_concordance_b64}" alt="Concordance distribution" style="margin-top:14px;">\n'
+
+    # --- Table or "no contamination" message ---
+    if n_warn_pairs == 0:
+        section += f"""
+    <div style="margin-top:18px; padding:14px 18px; background:#E8F5E9; border-radius:6px; border:1px solid #A5D6A7;">
+      <strong style="color:#2E7D32;">✓ No contamination detected.</strong>
+      No sample pairs exceeded the {args.concordance_warn}% similarity threshold.
+    </div>
+"""
+    else:
+        section += f"""
+    <h3 style="font-size:0.95rem; margin:18px 0 8px;">Pairs ≥ {args.concordance_warn}% Concordance</h3>
+    {concordance_table_html(concordance_warn_pairs, args.concordance_flag)}
+"""
+
+    section += "  </div>\n</div>\n"
+    return section
+
+
+def build_plate_layout_section():
+    if not plate_layout_b64s:
+        return ""
+
+    section = """
+<div class="card" id="plate_layout">
+  <div class="card-header"><h2>🧫 Plate Layouts – Concordance by Well</h2></div>
+  <div class="card-body">
+    <p style="font-size:13px; color:#546E7A; margin-bottom:14px;">
+      Each well shows the sample ID and its highest pairwise concordance with any other sample.
+      Wells highlighted in <span style="color:#B71C1C; font-weight:600;">red border</span>
+      exceed the duplicate threshold (≥ {flag}%).
+      Green wells are below the {warn}% reporting threshold (clean).
+    </p>
+""".format(flag=args.concordance_flag, warn=args.concordance_warn)
+
+    for plate_name, b64 in plate_layout_b64s.items():
+        section += f"""
+    <h3 style="font-size:0.95rem; margin:16px 0 6px; color:#283593;">{plate_name}</h3>
+    <img class="plot-img" src="data:image/png;base64,{b64}" alt="Plate layout {plate_name}" style="max-width:100%;">
+"""
+
+    section += "  </div>\n</div>\n"
+    return section
+
+
+def build_contamination_section():
+    if concordance_flag_pairs is None:
+        return ""
+
+    section = f"""
+<div class="card" id="contamination">
+  <div class="card-header"><h2>⚠️ Contaminated / Duplicate Samples</h2></div>
+  <div class="card-body">
+    <p style="margin-bottom:12px; font-size:13px; color:#546E7A;">
+      Samples listed here share ≥ {args.concordance_flag}% genotype concordance with at least one
+      other sample in the cohort. This likely indicates sample duplication, contamination,
+      or a labelling error. Both samples in each pair are listed.
+    </p>
+    {contamination_table_html(concordance_flag_pairs, samplesheet, args.concordance_flag)}
+  </div>
+</div>
+"""
+    return section
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7.  ASSEMBLE FINAL HTML
+# ══════════════════════════════════════════════════════════════════════════════
+
 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+concordance_nav  = '<a href="#concordance">Concordance</a>' if concordance_df is not None else ""
+plate_nav        = '<a href="#plate_layout">Plate Layouts</a>' if plate_layout_b64s else ""
+contam_nav       = '<a href="#contamination">Contamination</a>' if (concordance_flag_pairs is not None and len(concordance_flag_pairs)) else ""
 
 html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -446,6 +851,9 @@ html = f"""<!DOCTYPE html>
   <a href="#sexcheck">Sex Check</a>
   <a href="#ibd">IBD</a>
   <a href="#pca">PCA</a>
+  {concordance_nav}
+  {plate_nav}
+  {contam_nav}
   <a href="#flagged">Flagged Samples</a>
 </nav>
 
@@ -459,6 +867,8 @@ html = f"""<!DOCTYPE html>
       <div class="param-box"><div class="label">Sex Discordant</div><div class="value">{n_sex_discord}</div></div>
       <div class="param-box"><div class="label">IBD Pairs Flagged</div><div class="value">{n_ibd_pairs}</div></div>
       <div class="param-box"><div class="label">PCA Outliers</div><div class="value">{n_pca_outliers}</div></div>
+      <div class="param-box"><div class="label">Concordance ≥{args.concordance_warn}%</div><div class="value">{n_warn_pairs}</div></div>
+      <div class="param-box"><div class="label" style="color:#B71C1C;">Likely Duplicates (≥{args.concordance_flag}%)</div><div class="value" style="color:#B71C1C;">{n_flag_pairs}</div></div>
     </div>
     <br>
     <h3 style="font-size:0.95rem; margin-bottom:8px;">QC Parameters Used</h3>
@@ -466,6 +876,8 @@ html = f"""<!DOCTYPE html>
       <div class="param-box"><div class="label">Missingness cutoff (--mind)</div><div class="value">{args.mind}</div></div>
       <div class="param-box"><div class="label">Het SD cutoff</div><div class="value">±{args.het_sd} SD</div></div>
       <div class="param-box"><div class="label">IBD PI_HAT threshold</div><div class="value">{args.pi_hat}</div></div>
+      <div class="param-box"><div class="label">Concordance report threshold</div><div class="value">{args.concordance_warn}%</div></div>
+      <div class="param-box"><div class="label">Concordance duplicate flag</div><div class="value">{args.concordance_flag}%</div></div>
     </div>
     <br>
     {summary_table_html(summary_df)}
@@ -507,6 +919,10 @@ html = f"""<!DOCTYPE html>
     <img class="plot-img" src="data:image/png;base64,{plot_pca_b64}" alt="PCA plots">
   </div>
 </div>
+
+{build_concordance_section()}
+{build_plate_layout_section()}
+{build_contamination_section()}
 
 <div class="card" id="flagged">
   <div class="card-header"><h2>🚩 Flagged Samples (union of all QC stages)</h2></div>
