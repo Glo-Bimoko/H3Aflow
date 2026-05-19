@@ -5,41 +5,45 @@ nextflow.enable.dsl = 2
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     idat2vcf-pipeline  |  main.nf
     Stages:
-      0.  PREP_INPUTS       – resolve idat dirs from ready/ + derive sex_info from
-                              the samplesheet's "Collected Gender" column
-      1.  LINK_IDATS        – symlink resolved idat directories into work dir
-      2.  IDAT_TO_GTC       – bcftools +gtc2vcf plugin: idat → gtc
-      3.  GTC_TO_VCF        – bcftools +gtc2vcf plugin: gtc → normalised BCF
-      4.  VCF_TO_PLINK      – BCF → PLINK bed/bim/fam
-      5.  GENERATE_PHENOFILE– build .phe file from samplesheet
+      0.  PREP_INPUTS           – resolve idat dirs from ready/ + derive sex_info from
+                                  the samplesheet's "Collected Gender" column
+      1.  LINK_IDATS            – symlink resolved idat directories into work dir
+      2.  IDAT_TO_GTC           – bcftools +gtc2vcf plugin: idat → gtc
+      3.  GTC_TO_VCF            – bcftools +gtc2vcf plugin: gtc → normalised BCF
+      4.  VCF_TO_PLINK          – BCF → PLINK bed/bim/fam
+      5.  GENERATE_PHENOFILE    – build .phe file from samplesheet
       --- QC / sex-inference extension ---
-      6.  MERGE_PLINK       – merge per-plate PLINK sets into one cohort dataset
-      7.  SAMPLE_QC         – call rate + heterozygosity per sample
-      8.  SPLIT_CHROM       – extract chrX and chrY beds
-      9.  CHECK_SEX         – PLINK --check-sex (chrX F-statistic)
-      10. XY_INTENSITY      – extract X/Y raw intensities from GTC .tsv files
-      11. IBD               – PLINK --genome (IBS/IBD)
-      12. PCA               – PLINK2 --pca
-      13. REPORT            – compile HTML + CSV + flagged-sample list
+      6.  MERGE_PLINK           – merge per-plate PLINK sets into one cohort dataset
+      7.  SAMPLE_QC             – call rate + heterozygosity per sample
+      8.  FILTER_SAMPLES        – remove failing samples
+      9.  SNP_QC                – SNP-level QC (geno, MAF, HWE)
+      10. GENOTYPE_CONCORDANCE  – all-vs-all pairwise genotype concordance (chunked)
+      11. SPLIT_CHROM           – extract chrX and chrY beds
+      12. CHECK_SEX             – PLINK --check-sex (chrX F-statistic)
+      13. XY_INTENSITY          – extract X/Y raw intensities from GTC .tsv files
+      14. IBD                   – PLINK --genome (IBS/IBD)
+      15. PCA                   – PLINK2 --pca
+      16. REPORT                – compile HTML + CSV + flagged-sample list
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
-include { PREP_INPUTS       } from './modules/prep_inputs'
-include { LINK_IDATS        } from './modules/link_idats'
-include { IDAT_TO_GTC       } from './modules/idat_to_gtc'
-include { GTC_TO_VCF        } from './modules/gtc_to_vcf'
-include { VCF_TO_PLINK      } from './modules/vcf_to_plink'
-include { GENERATE_PHENOFILE} from './modules/generate_phenofile'
-include { MERGE_PLINK       } from './modules/merge_plink'
-include { SAMPLE_QC         } from './modules/sample_qc'
-include { FILTER_SAMPLES   } from './modules/filter_samples'
-include { SNP_QC            } from './modules/snp_qc'
-include { SPLIT_CHROM       } from './modules/split_chrom'
-include { CHECK_SEX         } from './modules/check_sex'
-include { XY_INTENSITY      } from './modules/xy_intensity'
-include { IBD               } from './modules/ibd'
-include { PCA               } from './modules/pca'
-include { REPORT            } from './modules/report'
+include { PREP_INPUTS           } from './modules/prep_inputs'
+include { LINK_IDATS            } from './modules/link_idats'
+include { IDAT_TO_GTC           } from './modules/idat_to_gtc'
+include { GTC_TO_VCF            } from './modules/gtc_to_vcf'
+include { VCF_TO_PLINK          } from './modules/vcf_to_plink'
+include { GENERATE_PHENOFILE    } from './modules/generate_phenofile'
+include { MERGE_PLINK           } from './modules/merge_plink'
+include { SAMPLE_QC             } from './modules/sample_qc'
+include { FILTER_SAMPLES        } from './modules/filter_samples'
+include { SNP_QC                } from './modules/snp_qc'
+include { GENOTYPE_CONCORDANCE  } from './modules/genotype_concordance'
+include { SPLIT_CHROM           } from './modules/split_chrom'
+include { CHECK_SEX             } from './modules/check_sex'
+include { XY_INTENSITY          } from './modules/xy_intensity'
+include { IBD                   } from './modules/ibd'
+include { PCA                   } from './modules/pca'
+include { REPORT                } from './modules/report'
 
 // ── Validate required params ──────────────────────────────────────────────────
 if (!params.samplesheet) {
@@ -132,18 +136,27 @@ workflow {
     SAMPLE_QC(MERGE_PLINK.out.merged)
 
     // -------------------------------------------------------------------------
-    // Stage 7b – SNP-level QC (geno, MAF, HWE) — mirrors h3agwas qc
+    // Stage 8 – remove failing samples, then SNP-level QC (geno, MAF, HWE)
     // -------------------------------------------------------------------------
     FILTER_SAMPLES(MERGE_PLINK.out.merged, SAMPLE_QC.out.keep_list)
     SNP_QC(FILTER_SAMPLES.out.plink)
 
     // -------------------------------------------------------------------------
-    // Stage 8 – split chrX / chrY (from SNP-QC-passed data)
+    // Stage 10 – all-vs-all pairwise genotype concordance
+    // Runs on the SNP-QC-passed cohort — the cleanest, most complete dataset.
+    // Uses chunked .traw streaming so peak memory stays flat regardless of
+    // sample or SNP count (see bin/pairwise_concordance.py).
+    // Pairs >= params.concordance_dup_thresh are flagged as likely duplicates.
+    // -------------------------------------------------------------------------
+    GENOTYPE_CONCORDANCE(SNP_QC.out.plink)
+
+    // -------------------------------------------------------------------------
+    // Stage 11 – split chrX / chrY (from SNP-QC-passed data)
     // -------------------------------------------------------------------------
     SPLIT_CHROM(SNP_QC.out.plink)
 
     // -------------------------------------------------------------------------
-    // Stage 9 – chrX F-statistic sex check
+    // Stage 12 – chrX F-statistic sex check
     // -------------------------------------------------------------------------
     CHECK_SEX(
         SPLIT_CHROM.out.chrX,
@@ -151,13 +164,13 @@ workflow {
     )
 
     // -------------------------------------------------------------------------
-    // Stage 10 – X/Y raw intensity from GTC .tsv files
+    // Stage 13 – X/Y raw intensity from GTC .tsv files
     // -------------------------------------------------------------------------
     ch_tsv_files = GTC_TO_VCF.out.tsv.map { plate, tsv -> tsv }.collect()
     XY_INTENSITY(ch_tsv_files, ch_sex_info)
 
     // -------------------------------------------------------------------------
-    // Stage 11 – IBD / duplicate detection
+    // Stage 14 – IBD / duplicate detection
     // -------------------------------------------------------------------------
     IBD(
         MERGE_PLINK.out.merged,
@@ -165,7 +178,7 @@ workflow {
     )
 
     // -------------------------------------------------------------------------
-    // Stage 12 – PCA
+    // Stage 15 – PCA
     // -------------------------------------------------------------------------
     PCA(
         MERGE_PLINK.out.merged,
@@ -173,7 +186,7 @@ workflow {
     )
 
     // -------------------------------------------------------------------------
-    // Stage 13 – report
+    // Stage 16 – report
     // -------------------------------------------------------------------------
     REPORT(
         CHECK_SEX.out.sexcheck,
