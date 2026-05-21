@@ -447,12 +447,26 @@ def well_to_row_col(well_str):
         return row_idx, col_idx
     return None, None
 
-if has_plate_info and samplesheet is not None and concordance_warn_pairs is not None:
+if has_plate_info and samplesheet is not None:
+    # ── Per-sample sex status lookup ──────────────────────────────────────────
+    # Keys: sample IID (str); Values: "OK" | "DISCORDANT" | "AMBIGUOUS" | "UNKNOWN"
+    sample_sex_status: dict = {}
+    if "DISCORDANT" in sexcheck.columns and "STATUS" in sexcheck.columns:
+        def _sex_status(row):
+            if row.get("DISCORDANT", False):
+                return "DISCORDANT"
+            inferred = row.get("INFERRED_SEX", "Unknown")
+            if inferred == "Unknown":
+                return "AMBIGUOUS"
+            return "OK"
+        for _, srow in sexcheck.iterrows():
+            sample_sex_status[str(srow["IID"])] = _sex_status(srow)
+
     # Build a per-sample max concordance score (highest similarity to any other sample)
     # Only considering pairs above the warn threshold
     sample_max_conc = {}
     sample_conc_partner = {}
-    if len(concordance_warn_pairs):
+    if concordance_warn_pairs is not None and len(concordance_warn_pairs):
         for _, row in concordance_warn_pairs.iterrows():
             sa, sb, pct = str(row["SAMPLE_A"]), str(row["SAMPLE_B"]), row["CONCORDANCE_PCT"]
             if sa not in sample_max_conc or pct > sample_max_conc[sa]:
@@ -472,28 +486,40 @@ if has_plate_info and samplesheet is not None and concordance_warn_pairs is not 
         grid_label = np.full((8, 12), "", dtype=object)
         grid_is_dup = np.zeros((8, 12), dtype=bool)
 
+        # Sex-discordance status per grid cell
+        grid_sex_status = np.full((8, 12), "", dtype=object)
+
         for _, srow in plate_samples.iterrows():
             r, c = well_to_row_col(srow.get("well", ""))
             if r is None:
                 continue
             sid = str(srow["sample_id"])
             max_pct = sample_max_conc.get(sid, np.nan)
-            grid_conc[r, c]  = max_pct if not np.isnan(max_pct) else 0.0
-            grid_label[r, c] = sid
+            grid_conc[r, c]   = max_pct if not np.isnan(max_pct) else 0.0
+            grid_label[r, c]  = sid
             grid_is_dup[r, c] = max_pct >= args.concordance_flag if not np.isnan(max_pct) else False
-
-        # Only plot if any sample has data
-        valid_sids = set(plate_samples["sample_id"].tolist())
-        any_data = any(sid in sample_max_conc or sid in {str(s) for s in plate_samples["sample_id"]}
-                       for sid in valid_sids)
+            grid_sex_status[r, c] = sample_sex_status.get(sid, "UNKNOWN")
 
         fig, ax = plt.subplots(figsize=(14, 6))
-        fig.suptitle(f"Plate Layout – {plate_name}\nMax pairwise concordance per well (≥{args.concordance_warn}% shown)",
-                     fontsize=11, fontweight="bold")
+        fig.suptitle(
+            f"Plate Layout – {plate_name}\n"
+            f"Background: max pairwise concordance per well  |  "
+            f"Corner triangle: sex check status",
+            fontsize=11, fontweight="bold",
+        )
 
         # Background: grey for empty, colour scale for occupied
         cmap = plt.cm.YlOrRd
         norm = Normalize(vmin=args.concordance_warn, vmax=100)
+
+        # Sex status → triangle fill colour (top-right corner triangle)
+        SEX_TRIANGLE_COLOR = {
+            "OK":         "#4CAF50",   # green  – concordant
+            "DISCORDANT": "#F44336",   # red    – sex discordant
+            "AMBIGUOUS":  "#FF9800",   # amber  – ambiguous F-stat
+            "UNKNOWN":    "#9E9E9E",   # grey   – no sex-check data
+            "":           "#9E9E9E",
+        }
 
         for r in range(8):
             for c in range(12):
@@ -502,36 +528,60 @@ if has_plate_info and samplesheet is not None and concordance_warn_pairs is not 
                 well_id    = f"{row_letter}{col_num:02d}"
 
                 # Check if this well is occupied
-                match = plate_samples[plate_samples["well"].astype(str).str.strip().str.upper() == well_id]
+                match = plate_samples[
+                    plate_samples["well"].astype(str).str.strip().str.upper() == well_id
+                ]
                 if len(match) == 0:
                     # Empty well
-                    rect = mpatches.FancyBboxPatch((c+0.05, r+0.05), 0.9, 0.9,
-                                                   boxstyle="round,pad=0.05",
-                                                   facecolor="#ECEFF1", edgecolor="#CFD8DC",
-                                                   linewidth=0.5)
+                    rect = mpatches.FancyBboxPatch(
+                        (c+0.05, r+0.05), 0.9, 0.9,
+                        boxstyle="round,pad=0.05",
+                        facecolor="#ECEFF1", edgecolor="#CFD8DC", linewidth=0.5,
+                    )
                     ax.add_patch(rect)
                 else:
-                    pct = grid_conc[r, c]
+                    pct    = grid_conc[r, c]
                     is_dup = grid_is_dup[r, c]
+                    sex_st = grid_sex_status[r, c]
 
+                    # ── Background fill (concordance) ─────────────────────────
                     if pct >= args.concordance_warn:
                         face_color = cmap(norm(pct))
                         edge_color = "#B71C1C" if is_dup else "#78909C"
                         edge_lw    = 2.5 if is_dup else 0.8
                     else:
-                        face_color = "#E8F5E9"   # clean green — below threshold
+                        face_color = "#E8F5E9"
                         edge_color = "#A5D6A7"
                         edge_lw    = 0.5
 
-                    rect = mpatches.FancyBboxPatch((c+0.05, r+0.05), 0.9, 0.9,
-                                                   boxstyle="round,pad=0.05",
-                                                   facecolor=face_color,
-                                                   edgecolor=edge_color,
-                                                   linewidth=edge_lw)
+                    rect = mpatches.FancyBboxPatch(
+                        (c+0.05, r+0.05), 0.9, 0.9,
+                        boxstyle="round,pad=0.05",
+                        facecolor=face_color, edgecolor=edge_color, linewidth=edge_lw,
+                    )
                     ax.add_patch(rect)
 
-                    # Sample ID label (truncated)
-                    sid = grid_label[r, c]
+                    # ── Sex status triangle (top-right corner) ────────────────
+                    # Triangle vertices: top-right corner occupying ~25% of cell
+                    tri_size = 0.30
+                    tri_x = c + 0.95
+                    tri_y = r + 0.05
+                    tri = plt.Polygon(
+                        [
+                            (tri_x,            tri_y),
+                            (tri_x - tri_size, tri_y),
+                            (tri_x,            tri_y + tri_size),
+                        ],
+                        closed=True,
+                        facecolor=SEX_TRIANGLE_COLOR.get(sex_st, "#9E9E9E"),
+                        edgecolor="white",
+                        linewidth=0.4,
+                        zorder=3,
+                    )
+                    ax.add_patch(tri)
+
+                    # ── Text labels ───────────────────────────────────────────
+                    sid        = grid_label[r, c]
                     label_text = sid[-6:] if len(sid) > 6 else sid
                     pct_text   = f"{pct:.1f}%" if pct >= args.concordance_warn else ""
                     ax.text(c + 0.5, r + 0.62, label_text,
@@ -560,13 +610,34 @@ if has_plate_info and samplesheet is not None and concordance_warn_pairs is not 
         cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.02)
         cbar.set_label("Max concordance with any other sample (%)", fontsize=9)
 
-        # Legend patches
-        clean_patch = mpatches.Patch(facecolor="#E8F5E9", edgecolor="#A5D6A7", label=f"< {args.concordance_warn}% (clean)")
-        warn_patch  = mpatches.Patch(facecolor=cmap(norm(90)), edgecolor="#78909C", label=f"≥ {args.concordance_warn}% (warn)")
-        dup_patch   = mpatches.Patch(facecolor=cmap(norm(99.5)), edgecolor="#B71C1C", linewidth=2.5, label=f"≥ {args.concordance_flag}% (DUPLICATE)")
-        empty_patch = mpatches.Patch(facecolor="#ECEFF1", edgecolor="#CFD8DC", label="Empty well")
-        ax.legend(handles=[clean_patch, warn_patch, dup_patch, empty_patch],
-                  loc="upper right", fontsize=8, bbox_to_anchor=(1.38, 1.0))
+        # Legend — two groups: concordance (patches) + sex status (triangles)
+        clean_patch  = mpatches.Patch(facecolor="#E8F5E9", edgecolor="#A5D6A7",
+                                      label=f"< {args.concordance_warn}% (clean)")
+        warn_patch   = mpatches.Patch(facecolor=cmap(norm(90)), edgecolor="#78909C",
+                                      label=f"≥ {args.concordance_warn}% (warn)")
+        dup_patch    = mpatches.Patch(facecolor=cmap(norm(99.5)), edgecolor="#B71C1C",
+                                      linewidth=2.5, label=f"≥ {args.concordance_flag}% (DUPLICATE)")
+        empty_patch  = mpatches.Patch(facecolor="#ECEFF1", edgecolor="#CFD8DC",
+                                      label="Empty well")
+        # Sex triangle legend entries (small squares stand in for triangles)
+        sex_ok_p    = mpatches.Patch(facecolor="#4CAF50", edgecolor="white",
+                                     label="▲ Sex OK")
+        sex_disc_p  = mpatches.Patch(facecolor="#F44336", edgecolor="white",
+                                     label="▲ Sex DISCORDANT")
+        sex_amb_p   = mpatches.Patch(facecolor="#FF9800", edgecolor="white",
+                                     label="▲ Sex AMBIGUOUS")
+        sex_unk_p   = mpatches.Patch(facecolor="#9E9E9E", edgecolor="white",
+                                     label="▲ Sex UNKNOWN")
+
+        have_sex_data = bool(sample_sex_status)
+        sex_legend_handles = (
+            [sex_ok_p, sex_disc_p, sex_amb_p, sex_unk_p] if have_sex_data else []
+        )
+        ax.legend(
+            handles=[clean_patch, warn_patch, dup_patch, empty_patch] + sex_legend_handles,
+            loc="upper right", fontsize=7.5, bbox_to_anchor=(1.42, 1.0),
+            framealpha=0.9,
+        )
 
         plt.tight_layout()
         plate_layout_b64s[plate_name] = fig_to_b64(fig)
@@ -743,8 +814,13 @@ def build_plate_layout_section():
     <p style="font-size:13px; color:#546E7A; margin-bottom:14px;">
       Each well shows the sample ID and its highest pairwise concordance with any other sample.
       Wells highlighted in <span style="color:#B71C1C; font-weight:600;">red border</span>
-      exceed the duplicate threshold (≥ {flag}%).
-      Green wells are below the {warn}% reporting threshold (clean).
+      exceed the duplicate threshold (≥ {flag}%).<br>
+      The <strong>coloured triangle</strong> in the top-right corner of each well indicates sex-check status:
+      <span style="color:#4CAF50; font-weight:600;">▲ green</span> = sex OK,
+      <span style="color:#F44336; font-weight:600;">▲ red</span> = sex DISCORDANT (collected ≠ inferred),
+      <span style="color:#FF9800; font-weight:600;">▲ amber</span> = ambiguous F-statistic,
+      <span style="color:#9E9E9E; font-weight:600;">▲ grey</span> = no sex-check data.
+      Green wells (background) are below the {warn}% concordance reporting threshold.
     </p>
 """.format(flag=args.concordance_flag, warn=args.concordance_warn)
 

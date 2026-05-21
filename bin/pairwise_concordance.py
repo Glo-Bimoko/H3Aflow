@@ -28,7 +28,7 @@ Output
      SAMPLE_A  SAMPLE_B  N_CALLED  N_MATCH  CONCORDANCE_PCT
 
 2. pairwise_concordance.log  — summary statistics and a flag list of
-   pairs whose concordance exceeds --dup-threshold (default 99.5 %).
+   pairs whose concordance exceeds --dup-threshold (default 90.0 %).
 
 Usage
 -----
@@ -36,7 +36,7 @@ Usage
       --traw    cohort_snpqc.traw \\
       --out     pairwise_concordance.tsv \\
       --chunk   50000 \\
-      --dup-threshold 99.5
+      --dup-threshold 90.0
 """
 
 import argparse
@@ -58,9 +58,9 @@ def parse_args():
     p.add_argument("--out",           required=True,  help="Output TSV path")
     p.add_argument("--chunk",         type=int, default=50_000,
                    help="SNPs to process per chunk (default: 50000)")
-    p.add_argument("--dup-threshold", type=float, default=99.5,
+    p.add_argument("--dup-threshold", type=float, default=90.0,
                    help="Concordance %% above which a pair is flagged as a "
-                        "likely duplicate (default: 99.5)")
+                        "likely duplicate (default: 90.0)")
     return p.parse_args()
 
 

@@ -61,6 +61,19 @@ v3 (2026-05):
     resolve the standard plugin dir dynamically and always append it to
     BCFTOOLS_PLUGINS so both plugin sets are available.
 
+v5 (2026-05):
+  Bug fix: preflight +setGT check was a false negative.
+
+  Root cause: `bcftools plugin setGT` with no arguments exits with code 255
+  when the plugin loads successfully (255 is bcftools' "printed usage, no work
+  done" sentinel).  The v4 guard checked `returncode not in (0, 1)`, so exit
+  255 was incorrectly treated as "plugin missing", aborting haploid recoding
+  even though setGT.so was present and loadable.  The diploid BCF was kept,
+  producing 821k+ het-haploid warnings in PLINK and invalid F-statistics.
+
+  Fix: detect plugin failure from stderr text only ("Failed to open plugin",
+  "No such file", etc.), completely ignoring the exit code for this check.
+
 v4 (2026-05):
   Bug fix: +setGT was silently failing on CHPC Lengau because the standard
   bcftools plugin dir was not being discovered correctly.
@@ -383,28 +396,43 @@ if args.sex_info:
                       flush=True)
 
                 # Preflight: verify +setGT is loadable before running the pipe.
-                # If the plugin is not found, bcftools exits non-zero and prints
-                # "Failed to open plugin".  Catch it here with a clear error
-                # message rather than a cryptic mid-pipe failure.
+                #
+                # IMPORTANT: `bcftools plugin setGT` with no arguments exits
+                # with code 255 when the plugin loads successfully (it prints
+                # usage and returns 255 as a "no work done" sentinel).  It only
+                # produces a "Failed to open plugin" message on stderr when the
+                # plugin .so cannot actually be found or loaded.  Therefore we
+                # must detect failure from the stderr text, NOT the exit code.
+                # The old guard `returncode not in (0, 1)` was a false negative:
+                # exit 255 = plugin OK, exit 1 = bcftools usage error, neither
+                # means "missing".
                 setgt_check = subprocess.run(
                     ["bcftools", "plugin", "setGT"],
                     capture_output=True, text=True, env=plugin_env,
                 )
+                stderr_lower = setgt_check.stderr.lower()
                 plugin_missing = (
-                    setgt_check.returncode not in (0, 1)
-                    or "failed to open" in setgt_check.stderr.lower()
-                    or "no such file" in setgt_check.stderr.lower()
+                    "failed to open" in stderr_lower
+                    or "no such file" in stderr_lower
+                    or "cannot open" in stderr_lower
+                    or "error opening" in stderr_lower
                 )
                 if plugin_missing:
                     raise SystemExit(
                         f"+setGT plugin not found. "
                         f"BCFTOOLS_PLUGINS={plugin_env.get('BCFTOOLS_PLUGINS', '(unset)')}.\n"
+                        f"bcftools stderr: {setgt_check.stderr.strip()}\n"
                         f"Set BCFTOOLS_LIBEXEC in your environment (or nextflow.config) to the "
                         f"directory containing setGT.so.\n"
                         f"On CHPC Lengau: export BCFTOOLS_LIBEXEC="
                         f"/apps/chpc/bio/bcftools/1.20/libexec/bcftools"
                     )
-                print("[convert_gtc2vcf] +setGT plugin verified OK.", flush=True)
+                print(
+                    f"[convert_gtc2vcf] +setGT plugin verified OK "
+                    f"(exit {setgt_check.returncode}, stderr: "
+                    f"{setgt_check.stderr[:80].strip()!r}).",
+                    flush=True,
+                )
 
                 setgt_pipe = (
                     f"bcftools view --force-samples --samples-file {males_file} --output-type u {tmp_xy} "
