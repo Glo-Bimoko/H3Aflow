@@ -183,6 +183,19 @@ summary["COLLECTED_SEX"] = summary["COLLECTED_SEX"].fillna("Unknown")
 summary.to_csv(args.out, sep="\t", index=False)
 print(f"[extract_xy_intensity] Written {len(summary)} samples → {args.out}", flush=True)
 
+# ── Validate that chrX / chrY data was actually found ─────────────────────────
+has_chrom_data = all(c in summary.columns for c in ["MEAN_X_X", "MEAN_Y_Y"])
+if not has_chrom_data:
+    print(
+        "\n[extract_xy_intensity] WARNING: No chrX/chrY per-SNP data found in the input TSV.\n"
+        "  The input file does not appear to contain per-variant intensity rows with CHR/NORMX/NORMY.\n"
+        "  Columns detected in the accumulator suggest the TSV may be a GTC metadata summary,\n"
+        "  not a per-SNP intensity file.\n"
+        "  The output TSV will contain genome-wide means only (MEAN_X / MEAN_Y).\n"
+        "  The chrX-vs-chrY scatter plot will be omitted.\n",
+        flush=True
+    )
+
 # ── Create interactive Plotly HTML report ──────────────────────────────────────
 print(f"[extract_xy_intensity] Creating interactive plot…", flush=True)
 
@@ -193,39 +206,44 @@ SEX_COLORS = {
     "Unknown": "#9E9E9E"
 }
 
-# Create subplots with 2 columns
+n_cols = 2 if has_chrom_data else 1
+subplot_titles = (
+    ["chrX vs chrY Intensity", "Genome-wide X vs Y Intensity"]
+    if has_chrom_data else
+    ["Genome-wide X vs Y Intensity"]
+)
+
 fig = make_subplots(
-    rows=1, cols=2,
-    subplot_titles=("chrX vs chrY Intensity", "Genome-wide X vs Y Intensity"),
+    rows=1, cols=n_cols,
+    subplot_titles=subplot_titles,
     horizontal_spacing=0.15
 )
 
-# Add traces for first subplot (chrX vs chrY)
-for sex, color in SEX_COLORS.items():
-    df_sex = summary[summary["COLLECTED_SEX"] == sex]
-    if not df_sex.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=df_sex["MEAN_X_X"],
-                y=df_sex["MEAN_Y_Y"],
-                mode='markers',
-                name=sex,
-                marker=dict(
-                    size=8,
-                    color=color,
-                    opacity=0.7,
-                    line=dict(width=0)
+# First subplot: chrX vs chrY (only when per-chromosome data is available)
+if has_chrom_data:
+    for sex, color in SEX_COLORS.items():
+        df_sex = summary[summary["COLLECTED_SEX"] == sex]
+        if not df_sex.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=df_sex["MEAN_X_X"],
+                    y=df_sex["MEAN_Y_Y"],
+                    mode='markers',
+                    name=sex,
+                    marker=dict(size=8, color=color, opacity=0.7, line=dict(width=0)),
+                    text=df_sex["IID"],
+                    hovertemplate=(
+                        "<b>%{text}</b><br>"
+                        "Mean chrX Intensity: %{x:.3f}<br>"
+                        "Mean chrY Intensity: %{y:.3f}<br>"
+                        "<extra></extra>"
+                    )
                 ),
-                text=df_sex["IID"],
-                hovertemplate="<b>%{text}</b><br>" +
-                              "Mean chrX Intensity: %{x:.3f}<br>" +
-                              "Mean chrY Intensity: %{y:.3f}<br>" +
-                              "<extra></extra>"
-            ),
-            row=1, col=1
-        )
+                row=1, col=1
+            )
 
-# Add traces for second subplot (genome-wide)
+# Genome-wide subplot (always present; col=2 if chrX/Y plot exists, else col=1)
+gw_col = 2 if has_chrom_data else 1
 for sex, color in SEX_COLORS.items():
     df_sex = summary[summary["COLLECTED_SEX"] == sex]
     if not df_sex.empty:
@@ -235,20 +253,17 @@ for sex, color in SEX_COLORS.items():
                 y=df_sex["MEAN_Y"],
                 mode='markers',
                 name=sex,
-                marker=dict(
-                    size=8,
-                    color=color,
-                    opacity=0.7,
-                    line=dict(width=0)
-                ),
+                marker=dict(size=8, color=color, opacity=0.7, line=dict(width=0)),
                 text=df_sex["IID"],
-                hovertemplate="<b>%{text}</b><br>" +
-                              "Genome-wide Mean X: %{x:.3f}<br>" +
-                              "Genome-wide Mean Y: %{y:.3f}<br>" +
-                              "<extra></extra>",
-                showlegend=False  # Hide duplicate legend entries
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "Genome-wide Mean X: %{x:.3f}<br>"
+                    "Genome-wide Mean Y: %{y:.3f}<br>"
+                    "<extra></extra>"
+                ),
+                showlegend=not has_chrom_data  # show legend only if it's the sole plot
             ),
-            row=1, col=2
+            row=1, col=gw_col
         )
 
 # Update layout
@@ -259,7 +274,7 @@ fig.update_layout(
         x=0.5
     ),
     hovermode='closest',
-    width=1200,
+    width=1200 if has_chrom_data else 700,
     height=600,
     legend=dict(
         title="Collected Sex",
@@ -274,10 +289,11 @@ fig.update_layout(
 )
 
 # Update axes
-fig.update_xaxes(title_text="Mean chrX Intensity (NORMX)", row=1, col=1, gridcolor='lightgray', gridwidth=0.5)
-fig.update_yaxes(title_text="Mean chrY Intensity (NORMY)", row=1, col=1, gridcolor='lightgray', gridwidth=0.5)
-fig.update_xaxes(title_text="Genome-wide Mean X Intensity (NORMX)", row=1, col=2, gridcolor='lightgray', gridwidth=0.5)
-fig.update_yaxes(title_text="Genome-wide Mean Y Intensity (NORMY)", row=1, col=2, gridcolor='lightgray', gridwidth=0.5)
+if has_chrom_data:
+    fig.update_xaxes(title_text="Mean chrX Intensity (NORMX)", row=1, col=1, gridcolor='lightgray', gridwidth=0.5)
+    fig.update_yaxes(title_text="Mean chrY Intensity (NORMY)", row=1, col=1, gridcolor='lightgray', gridwidth=0.5)
+fig.update_xaxes(title_text="Genome-wide Mean X Intensity (NORMX)", row=1, col=gw_col, gridcolor='lightgray', gridwidth=0.5)
+fig.update_yaxes(title_text="Genome-wide Mean Y Intensity (NORMY)", row=1, col=gw_col, gridcolor='lightgray', gridwidth=0.5)
 
 # Save as HTML
 fig.write_html(args.plot)
@@ -286,8 +302,15 @@ print(f"[extract_xy_intensity] Interactive plot saved → {args.plot}", flush=Tr
 # ── Summary stats ──────────────────────────────────────────────────────────────
 print("\n[extract_xy_intensity] Summary statistics by sex:")
 for sex, grp in summary.groupby("COLLECTED_SEX"):
-    print(
-        f"  {sex:8s}: n={len(grp):5d}  "
-        f"chrX mean_X={grp['MEAN_X_X'].mean():.4f}  "
-        f"chrY mean_Y={grp['MEAN_Y_Y'].mean():.4f}"
-    )
+    if has_chrom_data:
+        print(
+            f"  {sex:8s}: n={len(grp):5d}  "
+            f"chrX mean_X={grp['MEAN_X_X'].mean():.4f}  "
+            f"chrY mean_Y={grp['MEAN_Y_Y'].mean():.4f}"
+        )
+    else:
+        print(
+            f"  {sex:8s}: n={len(grp):5d}  "
+            f"genome-wide mean_X={grp['MEAN_X'].mean():.4f}  "
+            f"genome-wide mean_Y={grp['MEAN_Y'].mean():.4f}"
+        )
