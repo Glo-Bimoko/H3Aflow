@@ -3,6 +3,8 @@ process REPORT {
 
     input:
     path sexcheck
+    path multimind
+    path plate_report
     path xy_tsv
     path qc_stats
     path genome
@@ -15,6 +17,8 @@ process REPORT {
     path "qc_report.html"
     path "flagged_samples.tsv"
     path "cohort_summary.tsv"
+    path "sexcheck_multimind.tsv"
+    path "sexcheck_plate_report.tsv"
 
     script:
     def conc_arg  = concordance.name != "NO_FILE" ? "--concordance ${concordance}" : ""

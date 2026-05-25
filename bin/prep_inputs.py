@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 prep_inputs.py
 ==============
@@ -52,6 +51,8 @@ parser.add_argument("--out_samplesheet", required=True,
                     help="Path for the resolved samplesheet CSV (sample_id, idat_dir, plate)")
 parser.add_argument("--out_sex_info",    required=True,
                     help="Path for the sex_info TSV (sampleid, sex)")
+parser.add_argument("--gtc_dir",         default=None,
+                    help="Directory of pre-seeded per-sample GTC files ({sample_id}.gtc)")
 args = parser.parse_args()
 
 # ── Load samplesheet (CSV or Excel) ───────────────────────────────────────────
@@ -161,9 +162,18 @@ for dirpath, _dirs, files in os.walk(idat_root):
 
 print(f"[prep_inputs] Found {len(idat_index)} idat files.", flush=True)
 
+gtc_dir = Path(args.gtc_dir).resolve() if args.gtc_dir else None
+if gtc_dir:
+    if not gtc_dir.exists():
+        print(f"[prep_inputs] WARNING: gtc_dir not found: {gtc_dir}", flush=True)
+        gtc_dir = None
+    else:
+        print(f"[prep_inputs] GTC seed directory: {gtc_dir}", flush=True)
+
 # ── Resolve idat directory for each sample ─────────────────────────────────────
 resolved_rows = []
 missing = []
+gtc_seeded = []
 
 for _, row in ss.iterrows():
     sample_id = row[c_sample]
@@ -188,20 +198,24 @@ for _, row in ss.iterrows():
         dir_grn = dir_grn or idat_index.get(stem_grn_alt)
 
     if dir_red is None or dir_grn is None:
+        gtc_path = gtc_dir / f"{sample_id}.gtc" if gtc_dir else None
+        if gtc_path is not None and gtc_path.is_file():
+            resolved_rows.append({
+                "sample_id":    sample_id,
+                "idat_dir":     "GTC_SEED",
+                "barcode":      barcode,
+                "position":     position,
+                "plate":        plate,
+                "input_source": "gtc",
+            })
+            gtc_seeded.append(sample_id)
+            continue
+
         missing.append({
             "sample_id": sample_id,
             "barcode":   barcode,
             "position":  position,
             "missing":   "Red" if dir_red is None else "Grn",
-        })
-        # Still add a placeholder so the samplesheet is complete; the pipeline
-        # will fail loudly on this sample rather than silently skip it.
-        resolved_rows.append({
-            "sample_id": sample_id,
-            "idat_dir":  "MISSING",
-            "barcode":   barcode,
-            "position":  position,
-            "plate":     plate,
         })
         continue
 
@@ -215,11 +229,12 @@ for _, row in ss.iterrows():
         )
 
     resolved_rows.append({
-        "sample_id": sample_id,
-        "idat_dir":  str(dir_red.resolve()),
-        "barcode":   barcode,
-        "position":  position,
-        "plate":     plate,
+        "sample_id":    sample_id,
+        "idat_dir":     str(dir_red.resolve()),
+        "barcode":      barcode,
+        "position":     position,
+        "plate":        plate,
+        "input_source": "idat",
     })
 
 # ── Report missing ─────────────────────────────────────────────────────────────
@@ -241,12 +256,17 @@ if missing:
         f"    <barcode>_<sentrix_position>_Grn.idat\n",
         file=sys.stderr,
     )
-    # Remove MISSING rows and continue rather than exiting
-    resolved_rows = [r for r in resolved_rows if r["idat_dir"] != "MISSING"]
     print(
         f"[prep_inputs] Continuing with {len(resolved_rows)} samples "
-        f"({len(missing)} excluded due to missing idat files).",
+        f"({len(missing)} excluded due to missing idat/GTC).",
         flush=True
+    )
+
+if gtc_seeded:
+    print(
+        f"[prep_inputs] {len(gtc_seeded)} sample(s) will use pre-seeded GTC "
+        f"(no idat): {', '.join(gtc_seeded)}",
+        flush=True,
     )
 
 # ── Write resolved samplesheet ─────────────────────────────────────────────────

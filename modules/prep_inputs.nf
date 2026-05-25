@@ -13,6 +13,7 @@ process PREP_INPUTS {
     python ${projectDir}/bin/prep_inputs.py \
         --samplesheet     ${samplesheet}            \
         --idat_root       ${params.idat_root}       \
+        --gtc_dir         ${params.outdir}/gtc      \
         --out_samplesheet resolved_samplesheet.csv  \
         --out_sex_info    sex_info.tsv
 
