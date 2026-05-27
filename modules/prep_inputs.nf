@@ -15,10 +15,8 @@ process PREP_INPUTS {
         --idat_root       ${params.idat_root}       \
         --gtc_dir         ${params.outdir}/gtc      \
         --out_samplesheet resolved_samplesheet.csv  \
-        --out_sex_info    sex_info.tsv
-
-    # Reset the GTC bulk-scan lock so each pipeline run gets a fresh scan
-    rm -f "${params.outdir}/gtc/.scan_done"
+        --out_sex_info    sex_info.tsv              \
+        --reset-gtc-scan  --prefer-existing-gtc
     """
 
 }

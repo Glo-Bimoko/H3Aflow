@@ -158,7 +158,7 @@ process SNP_QC {
     echo "  Autosomal input             : \${N_AUTO_IN}" >> \$LOG
     echo "  Autosomal after QC          : \${N_OUT}"    >> \$LOG
     echo "  Autosomal dropped           : \${N_DROPPED}" >> \$LOG
-    echo "  chrX/Y/XY excluded from QC  : \$(( N_X + N_Y + N_XY )) (used by CHECK_SEX via SPLIT_CHROM)" >> \$LOG
+    echo "  chrX/Y/XY excluded from QC  : \$(( N_X + N_Y + N_XY )) (sex check uses GTC computed_gender)" >> \$LOG
     echo "  Output samples              : \$(wc -l < cohort_snpqc.fam)" >> \$LOG
     echo "========================================"     >> \$LOG
     echo "SNP QC Completed: \$(date)"                   >> \$LOG

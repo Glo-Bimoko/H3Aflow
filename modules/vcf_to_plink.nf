@@ -22,10 +22,7 @@ process VCF_TO_PLINK {
     #   --allow-extra-chr   : passes non-standard contigs through without error
     #   --split-x b37       : moves PAR1/PAR2 to XY contig so male X is truly haploid
     #
-    # NOTE: --const-fid 0 has been removed and replaced with --double-id.
-    #       make_sex_update.py writes FID=0, which would not match FID=IID.
-    #       The fix is applied in check_sex.nf: the sex update file now uses
-    #       FID=IID (written by make_sex_update.py after this change).
+    # NOTE: --const-fid 0 removed; --double-id sets FID = IID for downstream PLINK.
     plink \
         --bcf              "${bcf}"   \
         --keep-allele-order           \

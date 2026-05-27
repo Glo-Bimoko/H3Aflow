@@ -41,3 +41,10 @@ Thumbs.db
 
 #all the data files 
 prof_segun/
+
+#samplesheet
+filtered_plate_1_2_samples.csv
+plate_1_2_samples.csv
+GRCh37/made_samplesheet.csv
+plate_1_2_samples.csv
+

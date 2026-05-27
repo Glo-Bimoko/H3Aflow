@@ -12,7 +12,7 @@ then produces two outputs consumed by the Nextflow pipeline:
 
   --out_sex_info      sex_info.tsv
         Columns: sampleid, sex
-        sex: 0 = Female, 1 = Male  (matches annotate_sex_check.py convention)
+        sex: 0 = Female, 1 = Male  (matches gtc_sex_check.py convention)
 
 Expected samplesheet columns (case-insensitive, extra columns ignored):
   Sample ID | BeadChip Barcode | Sentrix Position | Plate Number |
@@ -28,6 +28,13 @@ The script searches recursively under --idat_root (default: ready/) for a
 directory that contains both files matching the barcode+position for each
 sample.  The search is intentionally broad so that idats can be nested
 arbitrarily deep within ready/.
+
+When --gtc_dir is set (results/gtc/ in the pipeline):
+  - Removes .scan_done so IDAT_TO_GTC runs a fresh bulk health scan (via
+    convert_idat2gtc.py).
+  - With --prefer-existing-gtc (default), samples that already have a healthy
+    {sample_id}.gtc are routed to SEED_GTC (input_source=gtc) instead of
+    IDAT_TO_GTC, even when idats are present on disk.
 
 Exit codes:
   0  – all samples resolved successfully
@@ -53,7 +60,57 @@ parser.add_argument("--out_sex_info",    required=True,
                     help="Path for the sex_info TSV (sampleid, sex)")
 parser.add_argument("--gtc_dir",         default=None,
                     help="Directory of pre-seeded per-sample GTC files ({sample_id}.gtc)")
+parser.add_argument(
+    "--prefer-existing-gtc",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help=(
+        "When a healthy {sample_id}.gtc already exists in --gtc_dir, route the sample "
+        "through GTC seeding (input_source=gtc) instead of IDAT_TO_GTC, even if idats "
+        "are present. Matches convert_idat2gtc skip behaviour."
+    ),
+)
+parser.add_argument(
+    "--reset-gtc-scan",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Remove gtc_dir/.scan_done so IDAT_TO_GTC runs a fresh bulk GTC health scan",
+)
 args = parser.parse_args()
+
+GTC_MIN_BYTES = 1 * 1024 * 1024  # keep in sync with convert_idat2gtc.py
+
+
+def gtc_looks_healthy(path: Path) -> bool:
+    """Fast pre-check (size + magic). Full checks run in convert_idat2gtc."""
+    if not path.is_file():
+        return False
+    try:
+        if path.stat().st_size < GTC_MIN_BYTES:
+            return False
+        with open(path, "rb") as fh:
+            return fh.read(3) == b"gtc"
+    except OSError:
+        return False
+
+
+def reset_gtc_scan_lock(gtc_dir: Path) -> None:
+    """Clear bulk-scan lock so the next IDAT_TO_GTC run rescans results/gtc/."""
+    flag = gtc_dir / ".scan_done"
+    gtc_dir.mkdir(parents=True, exist_ok=True)
+    if not flag.exists():
+        print("[prep_inputs] GTC bulk-scan lock: not set (fresh scan will run).", flush=True)
+        return
+    try:
+        flag.unlink()
+        print(f"[prep_inputs] GTC bulk-scan lock reset → removed {flag}", flush=True)
+    except OSError as exc:
+        print(
+            f"[prep_inputs] WARNING: Could not reset GTC bulk-scan lock ({flag}): {exc}\n"
+            "  IDAT_TO_GTC may skip the directory-wide broken-GTC purge. "
+            "Fix permissions on --gtc_dir or use a writable --outdir.",
+            flush=True,
+        )
 
 # ── Load samplesheet (CSV or Excel) ───────────────────────────────────────────
 print(f"[prep_inputs] Reading samplesheet: {args.samplesheet}", flush=True)
@@ -136,7 +193,7 @@ if len(unresolved_sex):
         f"  Values seen: {unresolved_sex[c_gender].unique().tolist()}",
         flush=True,
     )
-    # Write them as empty string — annotate_sex_check.py handles Unknown
+    # Write them as empty string — gtc_sex_check.py treats empty as Unknown
     ss.loc[ss["_sex_code"].isna(), "_sex_code"] = ""
 
 sex_info = ss[[c_sample, "_sex_code"]].copy()
@@ -169,11 +226,16 @@ if gtc_dir:
         gtc_dir = None
     else:
         print(f"[prep_inputs] GTC seed directory: {gtc_dir}", flush=True)
+        n_gtc_on_disk = len(list(gtc_dir.glob("*.gtc")))
+        print(f"[prep_inputs] Found {n_gtc_on_disk} .gtc file(s) on disk.", flush=True)
+        if args.reset_gtc_scan:
+            reset_gtc_scan_lock(gtc_dir)
 
 # ── Resolve idat directory for each sample ─────────────────────────────────────
 resolved_rows = []
 missing = []
 gtc_seeded = []
+idat_routed = []
 
 for _, row in ss.iterrows():
     sample_id = row[c_sample]
@@ -181,8 +243,10 @@ for _, row in ss.iterrows():
     position  = row[c_position]
     plate     = row[c_plate]
 
+    gtc_path = gtc_dir / f"{sample_id}.gtc" if gtc_dir else None
+    has_healthy_gtc = gtc_path is not None and gtc_looks_healthy(gtc_path)
+
     # Expected file stems (Illumina convention)
-    # Both barcode and position are lowercased to match the index
     stem_red = f"{barcode}_{position}_red".lower()
     stem_grn = f"{barcode}_{position}_grn".lower()
 
@@ -190,15 +254,27 @@ for _, row in ss.iterrows():
     dir_grn = idat_index.get(stem_grn)
 
     if dir_red is None or dir_grn is None:
-        # Try alternative: some pipelines omit position suffix
-        # e.g.  <Barcode>_Red.idat  (rare but seen in older Illumina exports)
         stem_red_alt = f"{barcode}_red"
         stem_grn_alt = f"{barcode}_grn"
         dir_red = dir_red or idat_index.get(stem_red_alt)
         dir_grn = dir_grn or idat_index.get(stem_grn_alt)
 
-    if dir_red is None or dir_grn is None:
-        gtc_path = gtc_dir / f"{sample_id}.gtc" if gtc_dir else None
+    has_idat = dir_red is not None and dir_grn is not None
+
+    # Prefer an existing healthy GTC (same rule as convert_idat2gtc skip path).
+    if args.prefer_existing_gtc and has_healthy_gtc:
+        resolved_rows.append({
+            "sample_id":    sample_id,
+            "idat_dir":     "GTC_SEED",
+            "barcode":      barcode,
+            "position":     position,
+            "plate":        plate,
+            "input_source": "gtc",
+        })
+        gtc_seeded.append(sample_id)
+        continue
+
+    if not has_idat:
         if gtc_path is not None and gtc_path.is_file():
             resolved_rows.append({
                 "sample_id":    sample_id,
@@ -219,7 +295,6 @@ for _, row in ss.iterrows():
         })
         continue
 
-    # Both files found; verify they live in the same directory
     if dir_red != dir_grn:
         print(
             f"[prep_inputs] WARNING: Red and Grn idats for {sample_id} are in "
@@ -236,6 +311,7 @@ for _, row in ss.iterrows():
         "plate":        plate,
         "input_source": "idat",
     })
+    idat_routed.append(sample_id)
 
 # ── Report missing ─────────────────────────────────────────────────────────────
 if missing:
@@ -264,8 +340,13 @@ if missing:
 
 if gtc_seeded:
     print(
-        f"[prep_inputs] {len(gtc_seeded)} sample(s) will use pre-seeded GTC "
-        f"(no idat): {', '.join(gtc_seeded)}",
+        f"[prep_inputs] {len(gtc_seeded)} sample(s) routed via existing GTC "
+        f"(SEED_GTC / skip IDAT_TO_GTC).",
+        flush=True,
+    )
+if idat_routed:
+    print(
+        f"[prep_inputs] {len(idat_routed)} sample(s) routed via idat → IDAT_TO_GTC.",
         flush=True,
     )
 
