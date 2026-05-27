@@ -272,7 +272,7 @@ If you use h3aflow in your research, give props to:
 
 - [bcftools gtc2vcf plugin](https://github.com/freeseek/gtc2vcf) by Giulio Genovese (freeseek)
 - [h3agwas](https://github.com/h3abionet/h3agwas) by H3ABioNet for QC design patterns
-- Dr Ayoub Ksouri (https://za.linkedin.com/in/ayoub-ksouri) for providing additional scripts used during development
+- Dr Ayoub Ksouri (https://za.linkedin.com/in/ayoub-ksouri) for providing conversion scripts used during development
 - Brandenburg Jean‑Tristan (https://za.linkedin.com/in/brandenburgj) for ideas and inspiration drawn from the H3AGWAS pipeline
 - [CHPC](https://www.chpc.ac.za/) Lengau cluster for compute resources
 
