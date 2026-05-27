@@ -17,57 +17,41 @@ nextflow.enable.dsl = 2
       7.  SAMPLE_QC             – call rate + heterozygosity per sample
       8.  FILTER_SAMPLES        – remove failing samples
 
-      ── Sex inference branch (runs on sample-filtered data, BEFORE SNP QC) ────────
-      9.  SPLIT_CHROM           – extract chrX and chrY beds from sample-filtered data
-      10. CHECK_SEX             – sex-stratified chrX QC + PLINK --check-sex
-                                  + multi-missingness classification (H3AGWAS xCheck.py)
-                                  + per-plate discordance report
+      ── Sex check (GTC computed_gender vs collected sex) ─────────────────────────
+      9.  CHECK_SEX             – compare Illumina GTC computed_gender with samplesheet
+                                  + per-plate discordance report + XY intensity summary
 
-      ── SNP QC branch (autosomes only, runs in parallel with sex inference) ────────
+      ── SNP QC branch (autosomes only) ───────────────────────────────────────────
       11. SNP_QC                – geno / MAF / HWE on autosomes only
                                   (chrX and chrY excluded — see snp_qc.nf)
 
       ── Downstream QC (all depend on SNP-QC-passed autosomal dataset) ───────────
       12. GENOTYPE_CONCORDANCE  – all-vs-all pairwise genotype concordance (chunked)
-      13. XY_INTENSITY          – extract X/Y raw intensities from GTC .tsv files
-      14. IBD                   – PLINK --genome (IBS/IBD)
-      15. PCA                   – PLINK2 --pca
-      16. REPORT                – compile HTML + CSV + flagged-sample list
+      13. IBD                   – PLINK --genome (IBS/IBD)
+      14. PCA                   – PLINK2 --pca
+      15. REPORT                – compile HTML + CSV + flagged-sample list
 
     DAG overview:
-                                       ┌─ SPLIT_CHROM ─► CHECK_SEX ─────────────────┐
-      MERGE ─► SAMPLE_QC ─► FILTER ───┤                                              ├─► REPORT
-                                       └─ SNP_QC ─► CONCORDANCE                      │
-                                                  └─────────────────────────────────►─┘
+      MERGE ─► SAMPLE_QC ─► FILTER ──┬─ SNP_QC ─► CONCORDANCE ─┐
+                                     │                          ├─► REPORT
+      GTC_QC ─► FILTER_GTC ─► CHECK_SEX (computed_gender) ─────┘
       (IBD and PCA run from MERGE+SAMPLE_QC output directly, not from SNP_QC)
 
-    Key design decisions vs original pipeline:
-      1. CHECK_SEX now feeds from FILTER_SAMPLES (pre-SNP-QC).
-         Cohort-wide --geno/--hwe/--maf on chrX are biologically invalid for a
-         mixed-sex cohort (males are hemizygous on non-PAR X); applying them before
-         sex check silently removed female-heterozygous X SNPs essential for F-stat
-         inference.  Sex-stratified chrX QC is now done entirely inside CHECK_SEX
-         (check_sex.nf Steps 4b/4c/5), where male missingness is measured post
-         --set-hh-missing and female stats are computed pre-nulling.
+    Key design decisions:
+      1. Sex check uses Illumina GTC computed_gender (from bcftools +gtc2vcf stats
+         during GTC_QC) compared to Collected Gender on the samplesheet — no chrX
+         PLINK --check-sex branch.
 
-      2. SNP_QC runs in parallel from the same FILTER_SAMPLES output but applies
-         --not-chr X Y XY so only autosomes are filtered.  GENOTYPE_CONCORDANCE,
-         IBD, and PCA only require autosomes.
+      2. SNP_QC applies --not-chr X Y XY so only autosomes are filtered.
 
-      3. CHECK_SEX now emits two extra outputs:
-           sexcheck_multimind.tsv  – per-sample classification across --mind
-                                     thresholds (H3AGWAS xCheck.py approach);
-                                     distinguishes hard discordant (label error)
-                                     from missingness-driven uncertain F.
-           sexcheck_plate_report.tsv – per-plate discordance rates; flags plates
-                                       with >=30% discordance as possible label swaps.
-         Both are passed to REPORT for inclusion in the QC HTML.
+      3. CHECK_SEX emits sexcheck_plate_report.tsv for batch-level label-swap alerts.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 
 include { PREP_INPUTS           } from './modules/prep_inputs'
 include { LINK_IDATS            } from './modules/link_idats'
 include { IDAT_TO_GTC           } from './modules/idat_to_gtc'
+include { GTC_QC; FILTER_GTC_SAMPLES } from './modules/gtc_qc'
 include { SEED_GTC              } from './modules/seed_gtc'
 include { GTC_TO_VCF            } from './modules/gtc_to_vcf'
 include { VCF_TO_PLINK          } from './modules/vcf_to_plink'
@@ -75,11 +59,9 @@ include { GENERATE_PHENOFILE    } from './modules/generate_phenofile'
 include { MERGE_PLINK           } from './modules/merge_plink'
 include { SAMPLE_QC             } from './modules/sample_qc'
 include { FILTER_SAMPLES        } from './modules/filter_samples'
-include { SPLIT_CHROM           } from './modules/split_chrom'
 include { CHECK_SEX             } from './modules/check_sex'
 include { SNP_QC                } from './modules/snp_qc'
 include { GENOTYPE_CONCORDANCE  } from './modules/genotype_concordance'
-include { XY_INTENSITY          } from './modules/xy_intensity'
 include { IBD                   } from './modules/ibd'
 include { PCA                   } from './modules/pca'
 include { REPORT                } from './modules/report'
@@ -154,17 +136,41 @@ workflow {
 
     // -------------------------------------------------------------------------
     // Stage 2b – SEED_GTC  (pre-supplied GTC, no idat)
-    // For intentional GTC-level duplicates: copy {sample_id}.gtc from results/gtc
+    // Copies {sample_id}.gtc from results/gtc when prep_inputs routes input_source=gtc.
     // -------------------------------------------------------------------------
     SEED_GTC(ch_gtc_seed_samples)
+
+    // All GTCs entering VCF conversion (from idat conversion and/or seeding).
+    ch_all_gtcs = IDAT_TO_GTC.out.gtc.mix(SEED_GTC.out.gtc)
+
+    // -------------------------------------------------------------------------
+    // Stage 2a – GTC_QC  (per plate)
+    // Runs bcftools +gtc2vcf on all GTCs for a plate (same batching as GTC_TO_VCF).
+    // Must use ch_all_gtcs — when every sample is SEED_GTC-only, IDAT_TO_GTC is empty.
+    // -------------------------------------------------------------------------
+    ch_gtcs_for_qc = ch_all_gtcs
+        .map { sample_id, gtc, plate -> tuple(plate, gtc) }
+        .groupTuple()
+
+    GTC_QC(
+        ch_gtcs_for_qc,
+        params.bpm,
+        params.egt,
+        params.fasta
+    )
+
+    FILTER_GTC_SAMPLES(
+        GTC_QC.out.stats.collect(),
+        params.gc10_threshold ?: 0.15,
+        params.call_rate_threshold ?: 0.95
+    )
 
     // -------------------------------------------------------------------------
     // Stage 3 – GTC_TO_VCF  (per plate)
     // Groups GTC files by plate, then calls bcftools +gtc2vcf to produce a
     // normalised, reference-aligned BCF per plate.
     // -------------------------------------------------------------------------
-    ch_gtcs_by_plate = IDAT_TO_GTC.out.gtc
-        .mix(SEED_GTC.out.gtc)
+    ch_gtcs_by_plate = ch_all_gtcs
         .map { sample_id, gtc, plate -> tuple(plate, gtc) }
         .groupTuple()
 
@@ -221,58 +227,19 @@ workflow {
     // -------------------------------------------------------------------------
     FILTER_SAMPLES(MERGE_PLINK.out.merged, SAMPLE_QC.out.keep_list)
 
-    // =========================================================================
-    // ── Branch A: Sex inference ───────────────────────────────────────────────
-    //
-    // Both SPLIT_CHROM and CHECK_SEX consume FILTER_SAMPLES output directly —
-    // the sample-filtered cohort with ALL SNPs intact.
-    //
-    // WHY before SNP QC:
-    //   Cohort-wide --geno / --hwe / --maf are biologically invalid on chrX
-    //   in a mixed-sex cohort.  Males are hemizygous on non-PAR X:
-    //     • --geno: het-haploid calls inflate per-SNP missingness for non-PAR X
-    //               variants, dropping female-informative SNPs that are perfect
-    //               for sex inference.
-    //     • --hwe : HWE is undefined for hemizygous loci; mixed-cohort HWE
-    //               produces spurious p-values on non-PAR X.
-    //     • --maf : cohort MAF conflates male hemizygous and female diploid
-    //               allele counts.
-    //   Sex-stratified chrX QC is handled entirely inside CHECK_SEX
-    //   (check_sex.nf Steps 4b/4c/5), using male stats post --set-hh-missing
-    //   and female stats pre-nulling.
-    // =========================================================================
-
     // -------------------------------------------------------------------------
-    // Stage 9 – SPLIT_CHROM
-    // Extracts chrX and chrY subsets from the sample-filtered cohort.
-    // chrX output feeds CHECK_SEX; chrY output is used by XY_INTENSITY.
-    // -------------------------------------------------------------------------
-    SPLIT_CHROM(FILTER_SAMPLES.out.plink)
-
-    // -------------------------------------------------------------------------
-    // Stage 10 – CHECK_SEX
-    // Runs sex-stratified chrX QC then PLINK --check-sex.
-    // Additional outputs vs original:
-    //   sexcheck_multimind.tsv    – per-sample H3AGWAS xCheck.py classification
-    //                               across --mind thresholds; separates hard
-    //                               discordant (label error) from missingness-
-    //                               driven uncertain F.
-    //   sexcheck_plate_report.tsv – per-plate discordance rates; plates with
-    //                               >=30% discordance flagged as possible label
-    //                               swaps.
+    // Stage 9 – CHECK_SEX (GTC computed_gender)
+    // Compares Illumina gender inference from GTC assessment with collected sex.
+    // Runs after GTC_QC; does not require PLINK chrX extraction.
     // -------------------------------------------------------------------------
     CHECK_SEX(
-        SPLIT_CHROM.out.chrX,
-        ch_sex_info
+        FILTER_GTC_SAMPLES.out.summary,
+        ch_sex_info,
+        PREP_INPUTS.out.resolved_samplesheet
     )
 
     // =========================================================================
-    // ── Branch B: SNP QC (autosomes only) ────────────────────────────────────
-    //
-    // Runs in parallel with Branch A from the same FILTER_SAMPLES output.
-    // --not-chr X Y XY inside SNP_QC excludes sex chromosomes from all filters,
-    // so the output dataset is autosome-only.  All downstream analyses
-    // (CONCORDANCE, IBD, PCA) only require autosomes.
+    // ── SNP QC (autosomes only) ──────────────────────────────────────────────
     // =========================================================================
 
     // -------------------------------------------------------------------------
@@ -296,19 +263,7 @@ workflow {
     GENOTYPE_CONCORDANCE(SNP_QC.out.plink, file(params.samplesheet))
 
     // -------------------------------------------------------------------------
-    // Stage 13 – XY_INTENSITY
-    // Extracts per-sample X and Y raw intensities directly from GTC .tsv files
-    // produced by GTC_TO_VCF.  Used for intensity-based sex inference as a
-    // complement to the F-statistic approach in CHECK_SEX.
-    // -------------------------------------------------------------------------
-    ch_tsv_files = GTC_TO_VCF.out.tsv
-        .map { plate, tsv -> tsv }
-        .collect()
-
-    XY_INTENSITY(ch_tsv_files, ch_sex_info)
-
-    // -------------------------------------------------------------------------
-    // Stage 14 – IBD
+    // Stage 13 – IBD
     // Runs PLINK --genome on the merged cohort (pre-SNP-QC) after applying the
     // SAMPLE_QC keep-list.  Uses the merged dataset rather than the SNP-QC-
     // passed dataset so that IBD estimation includes all variants.
@@ -319,7 +274,7 @@ workflow {
     )
 
     // -------------------------------------------------------------------------
-    // Stage 15 – PCA
+    // Stage 14 – PCA
     // Runs PLINK2 --pca on the merged cohort with the SAMPLE_QC keep-list.
     // Same reasoning as IBD: uses pre-SNP-QC merged data for full variant set.
     // -------------------------------------------------------------------------
@@ -329,14 +284,14 @@ workflow {
     )
 
     // -------------------------------------------------------------------------
-    // Stage 16 – REPORT
+    // Stage 15 – REPORT
     // Compiles all QC outputs into an HTML report + flagged-sample CSV.
     //
     // Inputs:
-    //   sexcheck             – annotated per-sample sex check result
-    //   multimind            – H3AGWAS xCheck.py multi-threshold classification
+    //   sexcheck             – GTC computed_gender vs collected sex
+    //   multimind            – per-sample discordance class
     //   plate_report         – per-plate discordance summary
-    //   xy_tsv               – X/Y intensity table from XY_INTENSITY
+    //   xy_tsv               – X/Y median intensities from GTC stats
     //   qc_stats             – per-sample call rate + het from SAMPLE_QC
     //   genome               – IBD pairwise estimates
     //   eigenvec             – PCA eigenvectors
@@ -348,12 +303,14 @@ workflow {
         CHECK_SEX.out.sexcheck,
         CHECK_SEX.out.multimind,
         CHECK_SEX.out.plate_report,
-        XY_INTENSITY.out.xy_tsv,
+        CHECK_SEX.out.xy_tsv,
         SAMPLE_QC.out.qc_stats,
         IBD.out.genome,
         PCA.out.eigenvec,
         ch_sex_info,
         GENOTYPE_CONCORDANCE.out.concordance,
-        file(params.samplesheet)
+        file(params.samplesheet),
+        FILTER_GTC_SAMPLES.out.summary,
+        FILTER_GTC_SAMPLES.out.poor_gc10_list
     )
 }

@@ -9,8 +9,8 @@ Reads all upstream QC outputs and writes:
   --out_summary  cohort_summary.tsv    (one-row key-value table)
 
 Inputs (all from prior pipeline stages):
-  --sexcheck      sex_check.sexcheck          (PLINK --check-sex; annotated by annotate_sex_check.py)
-  --xy_tsv        xy_intensity.tsv           (extract_xy_intensity.py)
+  --sexcheck      sexcheck.txt               (GTC computed_gender vs collected; gtc_sex_check.py)
+  --xy_tsv        xy_intensity.tsv           (median X/Y from GTC stats; gtc_sex_check.py)
   --qc_stats      sample_qc_stats.tsv        (compute_sample_qc.py)
   --genome        ibd.genome                 (PLINK --genome)
   --eigenvec      pca.eigenvec               (PLINK2 --pca)
@@ -52,6 +52,12 @@ parser.add_argument("--concordance", default=None,
                     help="pairwise_concordance.tsv from pairwise_concordance.py")
 parser.add_argument("--samplesheet", default=None,
                     help="Original samplesheet CSV with Plate Number and Well Position columns")
+parser.add_argument("--gtc_qc_summary", default=None,
+                    help="GTC-level per-sample QC summary TSV (from GTC_QC)")
+parser.add_argument("--poorgc10", default=None,
+                    help="List of samples failing p10_gc threshold (poorgc10.lst)")
+parser.add_argument("--gc10_threshold", type=float, default=0.15,
+                    help="Minimum p10_gc / gencall_score_10_percentile (matches nextflow.config)")
 # Optional thresholds (match nextflow.config defaults)
 parser.add_argument("--pi_hat",              type=float, default=0.1875)
 parser.add_argument("--mind",                type=float, default=0.05)
@@ -190,6 +196,42 @@ if args.concordance and os.path.exists(args.concordance):
     except Exception as e:
         print(f"[generate_report] Warning: could not load concordance file: {e}", flush=True)
 
+# ── GTC-level QC (optional)
+gtc_qc = None
+n_poor_gc10 = 0
+n_poor_cr = 0
+poor_gc10_samples = []
+if args.gtc_qc_summary and os.path.exists(args.gtc_qc_summary):
+    try:
+        gtc_qc = pd.read_csv(args.gtc_qc_summary, sep="\t")
+        # Normalise sample id column
+        if 'sample_id' in gtc_qc.columns:
+            gtc_qc['IID'] = gtc_qc['sample_id'].astype(str).str.strip()
+        elif 'IID' in gtc_qc.columns:
+            gtc_qc['IID'] = gtc_qc['IID'].astype(str).str.strip()
+
+        if 'pass_gc10' in gtc_qc.columns:
+            n_poor_gc10 = int((~gtc_qc['pass_gc10']).sum())
+        if 'pass_cr' in gtc_qc.columns:
+            n_poor_cr = int((~gtc_qc['pass_cr']).sum())
+        print(f"[generate_report] GTC QC summary loaded: {len(gtc_qc)} samples; poor_gc10={n_poor_gc10}, poor_cr={n_poor_cr}", flush=True)
+    except Exception as e:
+        print(f"[generate_report] Warning: could not load GTC QC summary: {e}", flush=True)
+
+if args.poorgc10 and os.path.exists(args.poorgc10):
+    try:
+        with open(args.poorgc10) as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if parts:
+                    poor_gc10_samples.append(parts[0])
+        # If count not determined from summary, set from list
+        if n_poor_gc10 == 0:
+            n_poor_gc10 = len(poor_gc10_samples)
+        print(f"[generate_report] poorgc10 list loaded: {len(poor_gc10_samples)} samples", flush=True)
+    except Exception as e:
+        print(f"[generate_report] Warning: could not load poorgc10 list: {e}", flush=True)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 2.  BUILD FLAGGED SAMPLES TABLE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -225,6 +267,14 @@ if concordance_flag_pairs is not None and len(concordance_flag_pairs):
     for iid in flagged_conc_iids:
         flag_records.append({"IID": iid, "FLAG": "CONCORDANCE_DUPLICATE", "SOURCE": "CONCORDANCE"})
 
+# Add GTC-level poor-quality flags (poorgc10 / GTC QC)
+if len(poor_gc10_samples):
+    for iid in poor_gc10_samples:
+        flag_records.append({"IID": str(iid), "FLAG": "POOR_GC10", "SOURCE": "GTC_QC"})
+elif gtc_qc is not None and 'pass_gc10' in gtc_qc.columns:
+    for _, row in gtc_qc[~gtc_qc['pass_gc10']].iterrows():
+        flag_records.append({"IID": str(row['IID']), "FLAG": "POOR_GC10", "SOURCE": "GTC_QC"})
+
 flagged_df = pd.DataFrame(flag_records) if flag_records else pd.DataFrame(columns=["IID","FLAG","SOURCE"])
 
 if len(flagged_df):
@@ -258,6 +308,8 @@ summary_rows = [
     (f"Concordance pairs ≥{args.concordance_warn}%", n_warn_pairs),
     (f"Concordance pairs ≥{args.concordance_flag}% (likely duplicates)", n_flag_pairs),
     ("Total uniquely flagged samples", len(flagged_agg)),
+    ("Samples failing GTC p10_gc (poor cluster quality)", int(n_poor_gc10)),
+    ("Samples failing GTC call-rate threshold", int(n_poor_cr)),
 ]
 
 summary_df = pd.DataFrame(summary_rows, columns=["Metric", "Value"])
@@ -308,22 +360,108 @@ ax.grid(True, linewidth=0.4, alpha=0.5)
 plt.tight_layout()
 plot_sampleqc_b64 = fig_to_b64(fig)
 
+# ══════════════════════════════════════════════════════════════════════════
+# Per-plate Call Rate vs 10% GenCall scatter plots (GTC-level QC)
+# ══════════════════════════════════════════════════════════════════════════
+plate_gc_b64s = {}
+if gtc_qc is not None:
+    merged = gtc_qc.copy()
+    # ensure IID and metric columns exist
+    if 'IID' in merged.columns:
+        merged['IID'] = merged['IID'].astype(str).str.strip()
+
+    # determine call_rate and p10_gc column names with common fallbacks
+    call_col = None
+    p10_col = None
+    for c in ['call_rate','Call_Rate','CALL_RATE','call rate']:
+        if c in merged.columns:
+            call_col = c
+            break
+    for c in [
+        'p10_gc', 'gencall_score_10_percentile',
+        '10%_GC_Score', '10%_GC_SCORE', 'p10gc',
+    ]:
+        if c in merged.columns:
+            p10_col = c
+            break
+
+    # attach plate label from samplesheet if available
+    if samplesheet is not None and 'sample_id' in samplesheet.columns and 'plate' in samplesheet.columns:
+        lookup_plate = samplesheet.set_index('sample_id')['plate'].astype(str).to_dict()
+        merged['plate_label'] = merged['IID'].map(lookup_plate).fillna('')
+    else:
+        # try common plate-like columns in gtc_qc
+        plate_col = None
+        for c in merged.columns:
+            if c.lower().replace('_',' ').replace('%','').strip() in ('institute plate label','institute plate','plate','plate label'):
+                plate_col = c
+                break
+        if plate_col:
+            merged['plate_label'] = merged[plate_col].astype(str).str.strip()
+
+    if 'plate_label' in merged.columns and merged['plate_label'].replace('', pd.NA).notna().any():
+        for plate_name, grp in merged.groupby('plate_label'):
+            try:
+                x = grp[p10_col] if p10_col and p10_col in grp.columns else None
+                y = grp[call_col] if call_col and call_col in grp.columns else None
+                if x is None or y is None:
+                    continue
+                fig, ax = plt.subplots(figsize=(6,5))
+                sexes = grp.get('computed_gender') if 'computed_gender' in grp.columns else None
+                colors = None
+                if sexes is not None:
+                    sex_map = {"0":"#E91E63","1":"#2196F3", "Female":"#E91E63","Male":"#2196F3"}
+                    colors = [sex_map.get(str(s), '#9E9E9E') for s in sexes]
+                ax.scatter(x, y, c=colors if colors is not None else '#1976D2', alpha=0.6, s=18, edgecolors='none')
+                ax.axvline(args.gc10_threshold, color='#C62828', linestyle='--', linewidth=1.2,
+                           label=f'p10_gc cutoff ({args.gc10_threshold})')
+                ax.axhline(0.95, color='#F57F17', linestyle=':', linewidth=1.0,
+                           label='call rate 0.95')
+                ax.set_xlabel('10% GenCall score (p10_gc)', fontsize=10)
+                ax.set_ylabel('Call rate', fontsize=10)
+                ax.set_title(f'Plate: {plate_name} (n={len(grp)})', fontsize=11)
+                ax.legend(fontsize=7, loc='lower right')
+                ax.grid(True, linewidth=0.4, alpha=0.5)
+                ax.set_xlim(left=0)
+                ax.set_ylim(0,1.02)
+                plate_gc_b64s[str(plate_name)] = fig_to_b64(fig)
+            except Exception:
+                continue
+
 # ── Plot B: Sex check ─────────────────────────────────────────────────────────
+use_gtc_sex = (
+    "INFERENCE_METHOD" in sexcheck.columns
+    and (sexcheck["INFERENCE_METHOD"] == "GTC_computed_gender").any()
+)
+sex_plot_title = "Sex Check – GTC computed gender" if use_gtc_sex else "Sex Check – chrX F-Statistic"
+
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-fig.suptitle("Sex Check – chrX F-Statistic", fontsize=12, fontweight="bold")
+fig.suptitle(sex_plot_title, fontsize=12, fontweight="bold")
 
 ax = axes[0]
-for sex, grp in sexcheck.groupby("COLLECTED_SEX"):
-    ax.hist(grp["F"].dropna(), bins=50, alpha=0.65,
-            color=SEX_PALETTE.get(sex, "#9E9E9E"), label=sex,
-            edgecolor="white", linewidth=0.3)
-ax.axvline(0.2, color="grey", linestyle=":", linewidth=1)
-ax.axvline(0.8, color="grey", linestyle=":", linewidth=1)
-ax.set_xlabel("F-statistic (chrX inbreeding coefficient)", fontsize=10)
-ax.set_ylabel("Samples", fontsize=10)
-ax.set_title("F-statistic by collected sex", fontsize=10)
-ax.legend(fontsize=8)
-ax.grid(True, linewidth=0.4, alpha=0.5)
+if use_gtc_sex and sexcheck["F"].notna().any():
+    for sex, grp in sexcheck.groupby("COLLECTED_SEX"):
+        ax.hist(grp["F"].dropna(), bins=50, alpha=0.65,
+                color=SEX_PALETTE.get(sex, "#9E9E9E"), label=sex,
+                edgecolor="white", linewidth=0.3)
+    ax.set_xlabel("log R deviation (GTC)", fontsize=10)
+    ax.set_ylabel("Samples", fontsize=10)
+    ax.set_title("logR deviation by collected sex", fontsize=10)
+elif not use_gtc_sex:
+    for sex, grp in sexcheck.groupby("COLLECTED_SEX"):
+        ax.hist(grp["F"].dropna(), bins=50, alpha=0.65,
+                color=SEX_PALETTE.get(sex, "#9E9E9E"), label=sex,
+                edgecolor="white", linewidth=0.3)
+    ax.axvline(0.2, color="grey", linestyle=":", linewidth=1)
+    ax.axvline(0.8, color="grey", linestyle=":", linewidth=1)
+    ax.set_xlabel("F-statistic (chrX inbreeding coefficient)", fontsize=10)
+    ax.set_ylabel("Samples", fontsize=10)
+    ax.set_title("F-statistic by collected sex", fontsize=10)
+else:
+    ax.set_visible(False)
+if ax.get_visible():
+    ax.legend(fontsize=8)
+    ax.grid(True, linewidth=0.4, alpha=0.5)
 
 ax = axes[1]
 if "MEAN_X_X" in xy.columns and "MEAN_Y_Y" in xy.columns:
@@ -834,6 +972,27 @@ def build_plate_layout_section():
     return section
 
 
+def build_plate_gc_section():
+        if not plate_gc_b64s:
+                return ""
+        section = """
+<div class="card" id="plate_gc">
+    <div class="card-header"><h2>🧫 Plate QC – Call Rate vs 10% GenCall</h2></div>
+    <div class="card-body">
+        <p style="font-size:13px; color:#546E7A; margin-bottom:14px;">
+            Per-plate scatter plots of Call Rate vs 10% GenCall score. Plates with
+            poor hybridisation or failed processing will cluster in the lower-left
+            corner (low call rate, low GenCall). Use these to spot plate-level failures.
+        </p>
+"""
+        for plate_name, b64 in plate_gc_b64s.items():
+                section += f"\n    <h3 style=\"font-size:0.95rem; margin:16px 0 6px; color:#283593;\">{plate_name}</h3>"
+                section += f"\n    <img class=\"plot-img\" src=\"data:image/png;base64,{b64}\" alt=\"Plate GC {plate_name}\" style=\"max-width:100%;\">"
+
+        section += "\n  </div>\n</div>\n"
+        return section
+
+
 def build_contamination_section():
     if concordance_flag_pairs is None:
         return ""
@@ -862,6 +1021,19 @@ now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 concordance_nav  = '<a href="#concordance">Concordance</a>' if concordance_df is not None else ""
 plate_nav        = '<a href="#plate_layout">Plate Layouts</a>' if plate_layout_b64s else ""
 contam_nav       = '<a href="#contamination">Contamination</a>' if (concordance_flag_pairs is not None and len(concordance_flag_pairs)) else ""
+plate_gc_nav     = '<a href="#plate_gc">Plate QC (CallRate vs GenCall)</a>' if plate_gc_b64s else ""
+
+# GTC QC explanatory note (shown when poor GC10 samples exist)
+gtc_qc_note = ""
+if n_poor_gc10:
+    gtc_qc_note = (
+        f"<p style=\"color:#B71C1C; font-weight:600; margin-top:8px;\">"
+        f"GTC QC: <strong>{int(n_poor_gc10)}</strong> samples have low 10% GenCall (p10_gc). "
+        "A low p10_gc means a meaningful fraction of that sample's SNP calls have poor cluster quality — "
+        "this is often missed by PLINK call-rate QC alone, because PLINK counts any non-missing genotype as present "
+        "even when the underlying cluster was poor. "
+        "These samples are flagged as <strong>POOR_GC10</strong> in the flagged-samples table and should be inspected or excluded.</p>"
+    )
 
 html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -929,6 +1101,7 @@ html = f"""<!DOCTYPE html>
   <a href="#pca">PCA</a>
   {concordance_nav}
   {plate_nav}
+  {plate_gc_nav}
   {contam_nav}
   <a href="#flagged">Flagged Samples</a>
 </nav>
@@ -967,11 +1140,12 @@ html = f"""<!DOCTYPE html>
        &nbsp;|&nbsp; Failing heterozygosity: <strong>{int(n_fail_het)}</strong>
        &nbsp;|&nbsp; Failing either: <strong>{int(n_fail_any)}</strong></p>
     <img class="plot-img" src="data:image/png;base64,{plot_sampleqc_b64}" alt="Sample QC plots">
+        {gtc_qc_note}
   </div>
 </div>
 
 <div class="card" id="sexcheck">
-  <div class="card-header"><h2>⚥ Sex Check – chrX F-Statistic &amp; XY Intensities</h2></div>
+  <div class="card-header"><h2>⚥ Sex Check – {"GTC computed gender" if use_gtc_sex else "chrX F-Statistic"} &amp; XY Intensities</h2></div>
   <div class="card-body">
     <p>PLINK STATUS=PROBLEM: <strong>{n_sex_problem}</strong>
        &nbsp;|&nbsp; Discordant (inferred ≠ collected): <strong>{n_sex_discord}</strong></p>
@@ -998,6 +1172,7 @@ html = f"""<!DOCTYPE html>
 
 {build_concordance_section()}
 {build_plate_layout_section()}
+{build_plate_gc_section()}
 {build_contamination_section()}
 
 <div class="card" id="flagged">
