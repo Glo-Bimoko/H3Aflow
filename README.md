@@ -24,12 +24,10 @@ Stage 5  GENERATE_PHENOFILE Build PLINK .phe file from samplesheet
 Stage 6  MERGE_PLINK        Merge all per-plate PLINK sets → one cohort dataset
 Stage 7  SAMPLE_QC          Flag samples: call rate (--mind) + heterozygosity outliers
 Stage 7b SNP_QC             Filter SNPs: missingness (--geno) · MAF · HWE
-Stage 8  SPLIT_CHROM        Extract chrX and chrY for sex inference
-Stage 9  CHECK_SEX          plink --check-sex (chrX F-statistic) + collected sex comparison
-Stage 10 XY_INTENSITY       Extract raw X/Y intensities from GTC TSVs
-Stage 11 IBD                LD pruning → plink --genome → flag duplicate/related pairs
-Stage 12 PCA                plink2 --pca → population structure
-Stage 13 REPORT             Self-contained HTML QC report + flagged_samples.tsv
+Stage 8  CHECK_SEX          GTC computed_gender vs collected sex + plate discordance
+Stage 9  IBD                LD pruning → plink --genome → flag duplicate/related pairs
+Stage 10 PCA                plink2 --pca → population structure
+Stage 11 REPORT             Self-contained HTML QC report + flagged_samples.tsv
     │
     ▼
 cohort_qc.bed / .bim / .fam   ←  ready for h3agwas qc or association testing
@@ -44,7 +42,7 @@ cohort_qc.bed / .bim / .fam   ←  ready for h3agwas qc or association testing
 | [Nextflow](https://www.nextflow.io/) | ≥ 22.10 | Workflow engine |
 | [bcftools](https://samtools.github.io/bcftools/) | ≥ 1.11 | idat→GTC, GTC→VCF |
 | [bcftools gtc2vcf plugin](https://github.com/freeseek/gtc2vcf) | 2024-05-05 | idat2gtc, gtc2vcf .so files |
-| [PLINK 1.9](https://www.cog-genomics.org/plink/) | 1.9 | VCF→PLINK, sample QC, sex check, IBD |
+| [PLINK 1.9](https://www.cog-genomics.org/plink/) | 1.9 | VCF→PLINK, sample QC, IBD |
 | [PLINK 2](https://www.cog-genomics.org/plink/2.0/) | ≥ 2.0 | PCA |
 | Python | ≥ 3.8 | QC scripts |
 | pandas, numpy, matplotlib | latest | Python dependencies |
@@ -190,8 +188,7 @@ results/
 ├── qc/
 │   ├── sample_qc/                 # call rate + het stats
 │   ├── snp_qc/                    # SNP filtering logs
-│   ├── sex_check/                 # F-statistic + discordant samples
-│   ├── xy_intensity/              # XY intensity plots
+│   ├── sex_check/                 # GTC computed_gender vs collected sex
 │   ├── ibd/                       # related pair flags
 │   └── pca/                       # eigenvectors + scree plot
 └── report/
@@ -211,7 +208,7 @@ h3aflow is a complete, standalone pipeline. It does not require h3agwas to perfo
 | idat → GTC → VCF conversion | ✅ | ❌ |
 | H3Africa BPM/EGT support | ✅ | ❌ |
 | XY raw intensity QC | ✅ | ❌ |
-| Sex inference (F-stat + XY) | ✅ | Partial |
+| Sex inference (GTC computed gender) | ✅ | Partial |
 | Sample QC (call rate, het) | ✅ | ✅ |
 | SNP QC (MAF, HWE, geno) | ✅ | ✅ |
 | IBD / duplicate detection | ✅ | ✅ |
@@ -228,7 +225,7 @@ h3aflow produces a fully QC-passed `cohort_qc.bed / .bim / .fam` dataset. If you
 
 ```
 h3aflow/
-├── main.nf                   # Orchestrates all 13 stages
+├── main.nf                   # Orchestrates the full workflow
 ├── nextflow.config           # Parameters, resource limits, profiles
 ├── run_pipeline.qsub         # PBS job script for CHPC Lengau
 ├── README.md
@@ -242,9 +239,7 @@ h3aflow/
 │   ├── merge_plink.nf
 │   ├── sample_qc.nf
 │   ├── snp_qc.nf
-│   ├── split_chrom.nf
 │   ├── check_sex.nf
-│   ├── xy_intensity.nf
 │   ├── ibd.nf
 │   ├── pca.nf
 │   └── report.nf
@@ -255,11 +250,12 @@ h3aflow/
     ├── convert_gtc2vcf.py
     ├── generate_phenofile.py
     ├── compute_sample_qc.py
-    ├── annotate_sex_check.py
-    ├── extract_xy_intensity.py
+    ├── gtc_sex_check.py
     ├── flag_ibd_duplicates.py
     ├── plot_pca.py
     └── generate_report.py
+├── archive/                  # deprecated/unused scripts kept for reference
+│   └── README.md
 ```
 
 ---
@@ -276,8 +272,10 @@ If you use h3aflow in your research, give props to:
 
 - [bcftools gtc2vcf plugin](https://github.com/freeseek/gtc2vcf) by Giulio Genovese (freeseek)
 - [h3agwas](https://github.com/h3abionet/h3agwas) by H3ABioNet for QC design patterns
+- Dr Ayoub Ksouri (https://za.linkedin.com/in/ayoub-ksouri) for providing additional scripts used during development
+- Brandenburg Jean‑Tristan (https://za.linkedin.com/in/brandenburgj) for ideas and inspiration drawn from the H3AGWAS pipeline
 - [CHPC](https://www.chpc.ac.za/) Lengau cluster for compute resources
-- The H3Africa consortium for array design and data
+
 
 ---
 
