@@ -8,7 +8,7 @@
 #PBS -o /mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/logs/pipeline_stdout.txt
 #PBS -e /mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/logs/pipeline_stderr.txt
 #PBS -N H3aFlow 
-#PBS -M add your own
+#PBS -M glory.bimoko@cpgr.org.za
 #PBS -m abe
 
 # ── Conda env sync ────────────────────────────────────────────────────────────
