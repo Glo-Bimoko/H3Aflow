@@ -4,22 +4,42 @@
 #PBS -l walltime=144:00:00
 #PBS -q seriallong
 
-#PBS -P add your own  // ← EDIT THIS
+#PBS -P add your own  
 #PBS -o /mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/logs/pipeline_stdout.txt
 #PBS -e /mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/logs/pipeline_stderr.txt
 #PBS -N H3aFlow 
 #PBS -M add your own
 #PBS -m abe
 
+# ── Conda env sync ────────────────────────────────────────────────────────────
+# Lustre is purged every 90 days; this block auto-clones H3AFlow if missing.
+# Source conda from the stable home-dir miniforge3 installation.
+source /home/gbimoko/miniforge3/etc/profile.d/conda.sh
+
+CONDA_ENV_SRC=/home/gbimoko/miniforge3/envs/H3AFlow
+CONDA_ENV_DST=/mnt/lustre/users/gbimoko/conda_envs/H3AFlow
+
+if [ ! -d "${CONDA_ENV_DST}" ]; then
+    echo "INFO: Lustre conda env not found — cloning from ${CONDA_ENV_SRC} ..."
+    mkdir -p /mnt/lustre/users/gbimoko/conda_envs
+    conda create --prefix "${CONDA_ENV_DST}" --clone "${CONDA_ENV_SRC}" -y
+    echo "INFO: Conda env clone complete."
+else
+    echo "INFO: Lustre conda env found at ${CONDA_ENV_DST} — skipping clone."
+fi
+
 # ── Load modules ──────────────────────────────────────────────────────────────
 module load chpc/BIOMODULES
 module load bcftools/1.20
-module load python/3.9.6
 module load java/24.0.1
 module load plink/2.00a
 module load libdeflate
+module load plink/1.90
 module load R/4.2.0
 module load chpc/nextflow/25.04.4
+module load bwa/0.7.17
+module load htslib/1.23.1
+module load samtools/1.20
 
 # ── Environment ───────────────────────────────────────────────────────────────
 export BCFTOOLS_PLUGINS=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/bin/plugins/gtc2vcf
@@ -30,7 +50,7 @@ mkdir -p ${NXF_WORK} ${NXF_TEMP} ${NXF_HOME}
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PIPELINE_DIR=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline
-SAMPLESHEET=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/made_samplesheet.csv
+SAMPLESHEET=/mnt/lustre/users/gbimoko/idat2vcf-pipeline/idat2vcf-pipeline/filtered_all_plates_samples.csv
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
 for f in "$SAMPLESHEET" \
