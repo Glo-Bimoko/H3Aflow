@@ -77,7 +77,7 @@ process IBD {
     
     # Step 6: Find genetically identical samples
     if [ -s ibd.genome ]; then
-        python ${projectDir}/bin/flag_ibd_duplicates.py \
+        ${params.python} ${projectDir}/bin/flag_ibd_duplicates.py \
             --genome ibd.genome \
             --pi_hat ${params.ibd_pi_hat} \
             --out ibd_duplicates.tsv \
@@ -93,7 +93,7 @@ process IBD {
         echo -e "FID1\tIID1\tFID2\tIID2\tPI_HAT" > ibd_duplicates.tsv
         echo -e "FID1\tIID1\tFID2\tIID2\tPI_HAT" > genetically_identical.tsv
         # Create dummy plot
-        python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('ibd_plot.png')"
+        ${params.python} -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('ibd_plot.png')"
     fi
     
     echo "IBD Analysis Completed: \$(date)" >> ibd.log

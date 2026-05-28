@@ -29,7 +29,7 @@ process REPORT {
     def gtc_arg   = gtc_qc_summary.name != "NO_FILE" ? "--gtc_qc_summary ${gtc_qc_summary}" : ""
     def poor_arg  = poorgc10.name != "NO_FILE" ? "--poorgc10 ${poorgc10}" : ""
     """
-    python ${projectDir}/bin/generate_report.py \\
+    ${params.python} ${projectDir}/bin/generate_report.py \\
         --sexcheck    ${sexcheck}   \\
         --xy_tsv      ${xy_tsv}     \\
         --qc_stats    ${qc_stats}   \\

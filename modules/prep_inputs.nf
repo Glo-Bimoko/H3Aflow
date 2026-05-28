@@ -10,7 +10,7 @@ process PREP_INPUTS {
 
     script:
     """
-    /mnt/lustre/users/gbimoko/conda_envs/H3AFlow/bin/python \
+    ${params.python} \
         ${projectDir}/bin/prep_inputs.py         \
         --samplesheet     ${samplesheet}         \
         --idat_root       ${params.idat_root}    \

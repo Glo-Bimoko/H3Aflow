@@ -30,7 +30,7 @@ process SAMPLE_QC {
         --out sample_qc
 
     # ── 3. Compute combined stats + flag failures ──────────────────────────
-    python ${projectDir}/bin/compute_sample_qc.py \
+    ${params.python} ${projectDir}/bin/compute_sample_qc.py \
         --imiss  sample_qc.imiss \
         --het    sample_qc.het   \
         --mind   ${params.mind}  \

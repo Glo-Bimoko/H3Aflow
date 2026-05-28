@@ -9,8 +9,9 @@ process GENERATE_PHENOFILE {
 
     script:
     """
-    python ${projectDir}/bin/generate_phenofile.py \
-        --samplesheet ${samplesheet} \
+    ${params.python} \
+        ${projectDir}/bin/generate_phenofile.py \
+        --samplesheet ${samplesheet}            \
         --out sample.phe
     """
 }

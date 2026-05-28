@@ -33,14 +33,14 @@ process GENOTYPE_CONCORDANCE {
         --out     cohort_for_conc  \\
         2>&1 | tee -a concordance_run.log
 
-    python3 ${projectDir}/bin/pairwise_concordance.py \\
+    ${params.python} ${projectDir}/bin/pairwise_concordance.py \\
         --traw          cohort_for_conc.traw     \\
         --out           pairwise_concordance.tsv \\
         --chunk         ${chunk}                 \\
         --dup-threshold ${dup_threshold}          \\
         2>&1 | tee -a concordance_run.log
 
-    python3 ${projectDir}/bin/check_idat_duplicates.py \\
+    ${params.python} ${projectDir}/bin/check_idat_duplicates.py \\
         --samplesheet ${samplesheet}             \\
         --fam         ${fam}                     \\
         --concordance pairwise_concordance.tsv   \\

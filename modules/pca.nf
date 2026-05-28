@@ -84,16 +84,16 @@ process PCA {
     
     # Step 4: Plot
     if [ -s pca.eigenvec ] && [ -s pca.eigenval ]; then
-        python ${projectDir}/bin/plot_pca.py \
+        ${params.python} ${projectDir}/bin/plot_pca.py \
             --eigenvec pca.eigenvec \
             --eigenval pca.eigenval \
             --out pca_plot.png || {
             echo "WARNING: Plotting failed, creating dummy plot" >> pca.log
-            python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('pca_plot.png')"
+            ${params.python} -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('pca_plot.png')"
         }
     else
         echo "ERROR: PCA failed to produce output" >> pca.log
-        python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('pca_plot.png')"
+        ${params.python} -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; plt.figure(); plt.savefig('pca_plot.png')"
     fi
     
     echo "PCA Completed: \$(date)" >> pca.log

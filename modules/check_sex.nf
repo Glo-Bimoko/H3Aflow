@@ -28,7 +28,7 @@ process CHECK_SEX {
     echo "Sex Check (GTC computed_gender): \$(date)"
     echo "========================================"
 
-    python3 ${projectDir}/bin/gtc_sex_check.py \\
+    ${params.python} ${projectDir}/bin/gtc_sex_check.py \\
         --gtc_qc_summary   ${gtc_qc_summary} \\
         --sex_info         ${sex_info} \\
         --samplesheet      ${resolved_samplesheet} \\

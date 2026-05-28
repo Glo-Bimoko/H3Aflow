@@ -10,9 +10,10 @@ process SEED_GTC {
 
     script:
     """
-    python3 ${projectDir}/bin/seed_gtc.py \\
-        --sample_id ${sample_id} \\
-        --gtc_dir   ${params.outdir}/gtc \\
+    ${params.python} \
+        ${projectDir}/bin/seed_gtc.py \
+        --sample_id ${sample_id}      \
+        --gtc_dir   ${params.outdir}/gtc \
         --output    ${sample_id}.gtc
     """
 }

@@ -10,10 +10,11 @@ process LINK_IDATS {
 
     script:
     """
-    python ${projectDir}/bin/link_idats.py \
-        --source   "${idat_dir}" \
+    ${params.python} \
+        ${projectDir}/bin/link_idats.py \
+        --source   "${idat_dir}"        \
         --dest     linked_idats/${sample_id} \
-        --barcode  "${barcode}" \
+        --barcode  "${barcode}"         \
         --position "${position}"
     """
 }
