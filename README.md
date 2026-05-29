@@ -1,6 +1,6 @@
-# h3aflow
+# H3Aflow
 
-**A Nextflow DSL2 pipeline for end-to-end processing of Illumina H3Africa SNP array data. From raw idat files to QC-passed, analysis-ready PLINK datasets.**
+**A Nextflow DSL2 pipeline for end-to-end processing of Illumina H3Africa SNP array data. From raw idat or GTC files to QC-passed, analysis-ready PLINK datasets.**
 
 [![Nextflow](https://img.shields.io/badge/nextflow%20DSL2-%E2%89%A522.10-23aa62.svg)](https://www.nextflow.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -9,29 +9,47 @@
 
 ## Overview
 
-h3aflow bridges the gap between raw Illumina idat files and the PLINK-format input required by downstream GWAS tools such as [h3agwas](https://github.com/h3abionet/h3agwas). No existing public pipeline covered this full conversion path for H3Africa array data. H3aflow was built to fill that gap.
+H3Aflow bridges the gap between raw Illumina array files and the PLINK-format input required by downstream GWAS tools such as [h3agwas](https://github.com/h3abionet/h3agwas). No existing public pipeline covered this full conversion path for H3Africa array data. H3Aflow was built to fill that gap.
 
 ```
-idat files (raw fluorescence)
+idat files  ──OR──  GTC files (pre-existing)
+    │                    │
+    │                    └─► SEED_GTC (copy from results/gtc/ → skip conversion)
     │
     ▼
-Stage 0  PREP_INPUTS        Resolve idat dirs from samplesheet · derive sex_info
-Stage 1  LINK_IDATS         Symlink per-sample idat files into clean work dirs
-Stage 2  IDAT_TO_GTC        bcftools +idat2gtc  →  GTC files (per sample)
-Stage 3  GTC_TO_VCF         bcftools +gtc2vcf   →  normalised BCF + XY intensity TSV (per plate)
-Stage 4  VCF_TO_PLINK       plink --bcf         →  PLINK bed/bim/fam (per plate)
-Stage 5  GENERATE_PHENOFILE Build PLINK .phe file from samplesheet
-Stage 6  MERGE_PLINK        Merge all per-plate PLINK sets → one cohort dataset
-Stage 7  SAMPLE_QC          Flag samples: call rate (--mind) + heterozygosity outliers
-Stage 7b SNP_QC             Filter SNPs: missingness (--geno) · MAF · HWE
-Stage 8  CHECK_SEX          GTC computed_gender vs collected sex + plate discordance
-Stage 9  IBD                LD pruning → plink --genome → flag duplicate/related pairs
-Stage 10 PCA                plink2 --pca → population structure
-Stage 11 REPORT             Self-contained HTML QC report + flagged_samples.tsv
+Stage 0   PREP_INPUTS        Resolve idat dirs from samplesheet · detect existing GTCs · derive sex_info
+Stage 1   LINK_IDATS         Symlink per-sample idat files into clean work dirs
+Stage 2   IDAT_TO_GTC        bcftools +idat2gtc  →  GTC files (per sample, skipped if GTC provided)
+Stage 2a  GTC_QC             bcftools +gtc2vcf stats  →  per-plate GTC quality metrics
+Stage 3   GTC_TO_VCF         bcftools +gtc2vcf   →  normalised BCF + XY intensity TSV (per plate)
+Stage 4   VCF_TO_PLINK       plink --bcf         →  PLINK bed/bim/fam (per plate)
+Stage 5   GENERATE_PHENOFILE Build PLINK .phe file from samplesheet
+Stage 6   MERGE_PLINK        Merge all per-plate PLINK sets → one cohort dataset
+Stage 7   SAMPLE_QC          Flag samples: call rate (--mind) + heterozygosity outliers
+Stage 7b  SNP_QC             Filter SNPs: missingness (--geno) · MAF · HWE (autosomes only)
+Stage 8   CHECK_SEX          GTC computed_gender vs collected sex + plate discordance report
+Stage 9   GENOTYPE_CONCORDANCE  All-vs-all pairwise concordance · flag likely duplicates
+Stage 10  IBD                LD pruning → plink --genome → flag duplicate/related pairs
+Stage 11  PCA                plink2 --pca → population structure
+Stage 12  REPORT             Self-contained HTML QC report + flagged_samples.tsv
     │
     ▼
-cohort_qc.bed / .bim / .fam   ←  ready for h3agwas qc or association testing
+cohort.bed / .bim / .fam   ←  ready for h3agwas or association testing
 ```
+
+---
+
+## Required Starting Materials
+
+H3Aflow accepts either **idat files** or **GTC files** as input — you do not need both.
+
+**Option A — idat files (raw fluorescence)**
+Place all idat files under a single root directory (they can be nested arbitrarily deep). The pipeline discovers them by matching `<BeadChip Barcode>_<Sentrix Position>_Red.idat` and `_Grn.idat` patterns recursively and converts them to GTC format automatically.
+
+**Option B — GTC files (pre-converted)**
+If you already have GTC files from a previous conversion run, place them in `results/gtc/` using the naming convention `{sample_id}.gtc`. The pipeline detects them automatically during `PREP_INPUTS`, routes those samples through `SEED_GTC` (a fast copy step), and skips the `IDAT_TO_GTC` conversion entirely for those samples.
+
+Both input types can be mixed — samples with existing GTCs skip conversion while samples with only idat files go through the full conversion path. This is particularly useful when resuming a partially completed run or when integrating data from multiple sources.
 
 ---
 
@@ -57,17 +75,17 @@ You must supply your own Illumina manifest and cluster files matching your array
 | `*.egt` | Illumina EGT cluster file |
 | `*.fasta` + `.fai` | Reference genome (GRCh37 recommended for H3Africa arrays) |
 
-> **Important:** The BPM and EGT must be from the same array revision. The H3Africa 2019 array has A1 and B1 revisions. mismatching them will cause probe lookup failures.
+> **Important:** The BPM and EGT must be from the same array revision. The H3Africa 2019 array has A1 and B1 revisions — mismatching them will cause probe lookup failures.
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/gbimoko/h3aflow.git
-cd h3aflow
+git clone https://github.com/Glo-Bimoko/H3Aflow.git
+cd H3Aflow
 
-# Install Python dependencies
+# Install Python dependencies into your conda environment
 pip install pandas numpy matplotlib openpyxl
 
 # Set bcftools plugin path
@@ -80,7 +98,7 @@ export BCFTOOLS_PLUGINS=/path/to/gtc2vcf/plugins
 
 ### 1. Prepare your samplesheet
 
-The samplesheet is a CSV file with the following columns (header names are case-insensitive):
+The samplesheet is a CSV file with the following columns (header names are case-insensitive, extra columns are ignored):
 
 | Column | Description | Example |
 |---|---|---|
@@ -91,12 +109,11 @@ The samplesheet is a CSV file with the following columns (header names are case-
 | Well Position | Optional, carried through for traceability | `A01` |
 | Collected Gender | Reported sex: Female/Male, F/M, 0/1 | `Female` |
 
-> Sex information is extracted automatically from the `Collected Gender` column. No separate sex_info file is needed.
+Sex information is extracted automatically from the `Collected Gender` column. No separate sex_info file is needed.
 
-### 2. Organise your idat files
+### 2. Organise your input files
 
-Place all idat files under a single root directory (they can be nested arbitrarily deep):
-
+**idat files:**
 ```
 ready/
 ├── Plate_01_IDAT_Files/
@@ -107,25 +124,36 @@ ready/
     └── ...
 ```
 
-The pipeline discovers idat files by matching `<BeadChip Barcode>_<Sentrix Position>_Red.idat` and `_Grn.idat` patterns recursively.
+**GTC files (if skipping idat conversion):**
+```
+results/
+└── gtc/
+    ├── 7801848.gtc
+    ├── 7801849.gtc
+    └── ...
+```
+
+GTC files must be named `{sample_id}.gtc` where `sample_id` matches the Sample ID column in your samplesheet. The pipeline detects them automatically — no extra flags required.
 
 ### 3. Configure
 
-Edit `nextflow.config` to set your paths:
+Edit `nextflow.config` to set your paths. The `python` parameter must point to the Python interpreter in your conda environment:
 
 ```groovy
+// local profile
 params {
-    bpm      = "/path/to/H3Africa_2019_20037295_A1.bpm"
-    egt      = "/path/to/H3Africa_2019_Gentrain_A1_ClusterFile_Final.egt"
-    fasta    = "/path/to/human_g1k_v37.fasta"
+    python    = "/home/<user>/miniforge3/envs/<env_name>/bin/python"
+    bpm       = "/path/to/H3Africa_2019_20037295_A1.bpm"
+    egt       = "/path/to/H3Africa_2019_Gentrain_A1_ClusterFile_Final.egt"
+    fasta     = "/path/to/human_g1k_v37.fasta"
     idat_root = "/path/to/ready/"
-    outdir   = "/path/to/results"
+    outdir    = "/path/to/results"
 }
 ```
 
 ### 4. Run
 
-**Locally:**
+**Locally (desktop/laptop):**
 ```bash
 nextflow run main.nf \
   --samplesheet /path/to/samplesheet.csv \
@@ -144,9 +172,15 @@ qsub run_pipeline.qsub
 
 | Profile | Use case |
 |---|---|
-| `local` | Laptop or desktop, no module system |
-| `chpc` | CHPC Lengau HPC, loads modules via `module load` |
-| `pbs` | PBS job submission (future use) |
+| `local` | Laptop or desktop — no module system, uses local conda env |
+| `chpc` | CHPC Lengau HPC — loads modules via `module load`, uses Lustre conda env |
+| `pbs` | PBS GPU queue (alternative CHPC submission) |
+
+Each profile sets its own `params.python` pointing to the correct conda environment for that machine. This means the same pipeline code runs on your desktop and on the cluster without any path changes in your `.nf` files.
+
+### CHPC Lustre conda env auto-sync
+
+Lustre storage at CHPC is purged every 90 days. The `run_pipeline.qsub` script handles this automatically — at the start of each job it checks whether the conda env exists on Lustre and clones it from your home directory if not. No manual intervention is needed.
 
 ---
 
@@ -159,11 +193,14 @@ qsub run_pipeline.qsub
 | `--bpm` | required | Illumina BPM manifest |
 | `--egt` | required | Illumina EGT cluster file |
 | `--fasta` | required | Reference genome FASTA |
+| `--python` | `"python"` | Path to Python interpreter (set per profile in config) |
 | `--mind` | `0.05` | Sample missingness cutoff (>5% → fail) |
 | `--het_sd` | `3` | Heterozygosity SD cutoff |
 | `--snp_missing` | `0.05` | SNP missingness cutoff (`--geno`) |
-| `--maf` | `0.01` | Minor allele frequency filter |
-| `--hwe` | `0.00001` | Hardy-Weinberg equilibrium p-value cutoff |
+| `--maf` | `0.0001` | Minor allele frequency filter |
+| `--hwe` | `1e-4` | Hardy-Weinberg equilibrium p-value cutoff |
+| `--gc10_threshold` | `0.15` | Minimum GTC p10 GenCall score |
+| `--call_rate_threshold` | `0.95` | Minimum GTC-level call rate |
 | `--ibd_pi_hat` | `0.1875` | PI_HAT threshold for flagging related pairs |
 | `--pca_components` | `10` | Number of PCs to compute |
 | `--outdir` | `./results` | Output directory |
@@ -175,7 +212,7 @@ qsub run_pipeline.qsub
 ```
 results/
 ├── inputs/
-│   ├── resolved_samplesheet.csv   # idat paths resolved for each sample
+│   ├── resolved_samplesheet.csv   # idat paths resolved + input_source per sample
 │   └── sex_info.tsv               # sex coded 0=Female, 1=Male
 ├── gtc/                           # per-sample GTC files
 ├── bcf/                           # per-plate normalised BCF files
@@ -186,9 +223,10 @@ results/
 ├── phenofile/
 │   └── sample.phe                 # PLINK phenotype file
 ├── qc/
-│   ├── sample_qc/                 # call rate + het stats
-│   ├── snp_qc/                    # SNP filtering logs
-│   ├── sex_check/                 # GTC computed_gender vs collected sex
+│   ├── sample_qc/                 # call rate + het stats + pass/fail lists
+│   ├── snp_qc/                    # SNP filtering logs (autosomes only)
+│   ├── check_sex/                 # GTC computed_gender vs collected sex
+│   ├── concordance/               # pairwise genotype concordance
 │   ├── ibd/                       # related pair flags
 │   └── pca/                       # eigenvectors + scree plot
 └── report/
@@ -199,72 +237,84 @@ results/
 
 ---
 
-## Comparison with h3agwas
-
-h3aflow is a complete, standalone pipeline. It does not require h3agwas to perform QC. The two pipelines are complementary. H3aflow covers everything from raw idat files through QC, while h3agwas covers association testing and meta-analysis:
-
-| Capability | h3aflow | h3agwas |
-|---|---|---|
-| idat → GTC → VCF conversion | ✅ | ❌ |
-| H3Africa BPM/EGT support | ✅ | ❌ |
-| XY raw intensity QC | ✅ | ❌ |
-| Sex inference (GTC computed gender) | ✅ | Partial |
-| Sample QC (call rate, het) | ✅ | ✅ |
-| SNP QC (MAF, HWE, geno) | ✅ | ✅ |
-| IBD / duplicate detection | ✅ | ✅ |
-| PCA | ✅ | ✅ |
-| Association testing | ❌ | ✅ |
-| Meta-analysis | ❌ | ✅ |
-| DSL2 | ✅ | ❌ (requires NXF ≤ 22.10) |
-
-h3aflow produces a fully QC-passed `cohort_qc.bed / .bim / .fam` dataset. If you wish to proceed to association testing, this output is directly compatible with the h3agwas `assoc` workflow, no format conversion needed.
-
----
-
 ## Pipeline Structure
 
 ```
-h3aflow/
-├── main.nf                   # Orchestrates the full workflow
-├── nextflow.config           # Parameters, resource limits, profiles
-├── run_pipeline.qsub         # PBS job script for CHPC Lengau
+H3Aflow/
+├── main.nf                        # Orchestrates the full workflow
+├── nextflow.config                # Parameters, resource limits, profiles
+├── run_pipeline.qsub              # PBS job script for CHPC Lengau
 ├── README.md
 ├── modules/
 │   ├── prep_inputs.nf
 │   ├── link_idats.nf
 │   ├── idat_to_gtc.nf
+│   ├── seed_gtc.nf
+│   ├── gtc_qc.nf
 │   ├── gtc_to_vcf.nf
 │   ├── vcf_to_plink.nf
 │   ├── generate_phenofile.nf
 │   ├── merge_plink.nf
 │   ├── sample_qc.nf
+│   ├── filter_samples.nf
 │   ├── snp_qc.nf
 │   ├── check_sex.nf
+│   ├── genotype_concordance.nf
 │   ├── ibd.nf
 │   ├── pca.nf
 │   └── report.nf
 └── bin/
     ├── prep_inputs.py
     ├── link_idats.py
+    ├── seed_gtc.py
     ├── convert_idat2gtc.py
-    ├── convert_gtc2vcf.py
     ├── generate_phenofile.py
     ├── compute_sample_qc.py
+    ├── pairwise_concordance.py
+    ├── check_idat_duplicates.py
     ├── gtc_sex_check.py
     ├── flag_ibd_duplicates.py
     ├── plot_pca.py
     └── generate_report.py
-├── archive/                  # deprecated/unused scripts kept for reference
-│   └── README.md
 ```
 
 ---
 
-## Citation
+## Key Design Decisions
 
-If you use h3aflow in your research, give props to:
+**Sex check uses GTC computed_gender, not PLINK --check-sex.**
+Illumina's genotype calling assigns a computed gender to each sample during GTC generation. H3Aflow extracts this from `bcftools +gtc2vcf` stats and compares it to the samplesheet's Collected Gender. This avoids the need for chrX LD pruning and is more robust on arrays with sparse chrX coverage.
 
-> Glory Bimoko & the CPGR Team for making this accessible.
+**SNP QC is autosomes-only.**
+`--geno`, `--maf`, and `--hwe` are applied with `--not-chr X Y XY`. Sex chromosome SNPs are excluded from these filters because male hemizygosity inflates chrX missingness and makes cohort-wide HWE invalid. chrX QC is handled separately in CHECK_SEX.
+
+**IBD and PCA use the pre-SNP-QC merged dataset.**
+Running IBD and PCA on the full variant set (before SNP QC) gives more stable estimates. The SAMPLE_QC keep-list is applied to restrict to QC-passing samples.
+
+---
+
+## Comparison with h3agwas
+
+H3Aflow is a complete, standalone pipeline. It does not require h3agwas to perform QC. The two pipelines are complementary — H3Aflow covers everything from raw array files through QC, while h3agwas covers association testing and meta-analysis:
+
+| Capability | H3Aflow | h3agwas |
+|---|---|---|
+| idat → GTC → VCF conversion | ✅ | ❌ |
+| GTC file input (skip conversion) | ✅ | ❌ |
+| H3Africa BPM/EGT support | ✅ | ❌ |
+| XY raw intensity QC | ✅ | ❌ |
+| Sex inference (GTC computed gender) | ✅ | Partial |
+| GTC-level call rate / GenCall QC | ✅ | ❌ |
+| Sample QC (call rate, het) | ✅ | ✅ |
+| SNP QC (MAF, HWE, geno) | ✅ | ✅ |
+| Genotype concordance | ✅ | ❌ |
+| IBD / duplicate detection | ✅ | ✅ |
+| PCA | ✅ | ✅ |
+| Association testing | ❌ | ✅ |
+| Meta-analysis | ❌ | ✅ |
+| DSL2 | ✅ | ❌ (requires NXF ≤ 22.10) |
+
+H3Aflow produces a fully QC-passed `cohort.bed / .bim / .fam` dataset that is directly compatible with the h3agwas `assoc` workflow — no format conversion needed.
 
 ---
 
@@ -273,9 +323,16 @@ If you use h3aflow in your research, give props to:
 - [bcftools gtc2vcf plugin](https://github.com/freeseek/gtc2vcf) by Giulio Genovese (freeseek)
 - [h3agwas](https://github.com/h3abionet/h3agwas) by H3ABioNet for QC design patterns
 - Dr Ayoub Ksouri (https://za.linkedin.com/in/ayoub-ksouri) for providing conversion scripts used during development
-- Dr Brandenburg Jean‑Tristan (https://za.linkedin.com/in/brandenburgj) for ideas and inspiration drawn from the H3AGWAS pipeline
+- Dr. Jean-Tristan Brandenburg (https://za.linkedin.com/in/brandenburgj) for ideas and inspiration drawn from the H3AGWAS pipeline
 - [CHPC](https://www.chpc.ac.za/) Lengau cluster for compute resources
 
+---
+
+## Citation
+
+If you use H3Aflow in your research, please cite:
+
+> Glory Bimoko & the CPGR Team. H3Aflow: end-to-end Nextflow pipeline for Illumina H3Africa SNP array processing. https://github.com/Glo-Bimoko/H3Aflow
 
 ---
 
