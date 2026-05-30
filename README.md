@@ -41,7 +41,7 @@ cohort.bed / .bim / .fam   ←  ready for h3agwas or association testing
 
 ## Required Starting Materials
 
-H3Aflow accepts either **idat files** or **GTC files** as input — you do not need both.
+H3Aflow accepts either **idat files** or **GTC files** as input. One does not need both.
 
 **Option A — idat files (raw fluorescence)**
 Place all idat files under a single root directory (they can be nested arbitrarily deep). The pipeline discovers them by matching `<BeadChip Barcode>_<Sentrix Position>_Red.idat` and `_Grn.idat` patterns recursively and converts them to GTC format automatically.
@@ -49,7 +49,7 @@ Place all idat files under a single root directory (they can be nested arbitrari
 **Option B — GTC files (pre-converted)**
 If you already have GTC files from a previous conversion run, place them in `results/gtc/` using the naming convention `{sample_id}.gtc`. The pipeline detects them automatically during `PREP_INPUTS`, routes those samples through `SEED_GTC` (a fast copy step), and skips the `IDAT_TO_GTC` conversion entirely for those samples.
 
-Both input types can be mixed — samples with existing GTCs skip conversion while samples with only idat files go through the full conversion path. This is particularly useful when resuming a partially completed run or when integrating data from multiple sources.
+Both input types can be mixed. Samples with existing GTCs skip conversion while samples with only idat files go through the full conversion path. This is particularly useful when resuming a partially completed run or when integrating data from multiple sources.
 
 ---
 
@@ -180,7 +180,7 @@ Each profile sets its own `params.python` pointing to the correct conda environm
 
 ### CHPC Lustre conda env auto-sync
 
-Lustre storage at CHPC is purged every 90 days. The `run_pipeline.qsub` script handles this automatically — at the start of each job it checks whether the conda env exists on Lustre and clones it from your home directory if not. No manual intervention is needed.
+Lustre storage at CHPC is purged every 90 days. Seeing that the scheduler isn't able to access a user's home directory, all conda envs belonging to the user will not be visible to the pipeline when a job is submitted. The `run_pipeline.qsub` script handles this automatically by making a clone of the conda environment. In the case where it was purged after 90 days, the .qsub script will auto-sync, thus removing the need for regular maintenance. At the start of each job it checks whether the conda env exists on Lustre and clones it from the user's home directory if previously purged. No manual intervention is needed.
 
 ---
 
@@ -293,11 +293,11 @@ Running IBD and PCA on the full variant set (before SNP QC) gives more stable es
 
 ---
 
-## Comparison with h3agwas
+## Comparison with H3AGWAS
 
-H3Aflow is a complete, standalone pipeline. It does not require h3agwas to perform QC. The two pipelines are complementary — H3Aflow covers everything from raw array files through QC, while h3agwas covers association testing and meta-analysis:
+H3Aflow is a complete, standalone pipeline. It does not require H3AGWAS to perform QC. The two pipelines are complementary. H3Aflow covers everything from raw array files through QC, while H3AGWAS covers association testing and meta-analysis:
 
-| Capability | H3Aflow | h3agwas |
+| Capability | H3Aflow | H3AGWAS |
 |---|---|---|
 | idat → GTC → VCF conversion | ✅ | ❌ |
 | GTC file input (skip conversion) | ✅ | ❌ |
