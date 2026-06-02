@@ -332,7 +332,7 @@ H3Aflow produces a fully QC-passed `cohort.bed / .bim / .fam` dataset that is di
 
 If you use H3Aflow in your research, please cite:
 
-> Glory Bimoko & the CPGR Team. H3Aflow: end-to-end Nextflow pipeline for Illumina H3Africa SNP array processing. https://github.com/Glo-Bimoko/H3Aflow
+> Glory Bimoko & the CPGR Team.
 
 ---
 
