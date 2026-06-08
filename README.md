@@ -75,7 +75,7 @@ You must supply your own Illumina manifest and cluster files matching your array
 | `*.egt` | Illumina EGT cluster file |
 | `*.fasta` + `.fai` | Reference genome (GRCh37 recommended for H3Africa arrays) |
 
-> **Important:** The BPM and EGT must be from the same array revision. The H3Africa 2019 array has A1 and B1 revisions — mismatching them will cause probe lookup failures.
+> **Important:** The BPM and EGT must be from the same array revision. The H3Africa 2019 array has A1 and B1 revisions, mismatching them will cause probe lookup failures.
 
 ---
 
@@ -133,7 +133,7 @@ results/
     └── ...
 ```
 
-GTC files must be named `{sample_id}.gtc` where `sample_id` matches the Sample ID column in your samplesheet. The pipeline detects them automatically — no extra flags required.
+GTC files must be named `{sample_id}.gtc` where `sample_id` matches the Sample ID column in your samplesheet. The pipeline detects them automatically, no extra flags required.
 
 ### 3. Configure
 
@@ -172,8 +172,8 @@ qsub run_pipeline.qsub
 
 | Profile | Use case |
 |---|---|
-| `local` | Laptop or desktop — no module system, uses local conda env |
-| `chpc` | CHPC Lengau HPC — loads modules via `module load`, uses Lustre conda env |
+| `local` | Laptop or desktop —> no module system, uses local conda env |
+| `chpc` | CHPC Lengau HPC —> loads modules via `module load`, uses Lustre conda env |
 | `pbs` | PBS GPU queue (alternative CHPC submission) |
 
 Each profile sets its own `params.python` pointing to the correct conda environment for that machine. This means the same pipeline code runs on your desktop and on the cluster without any path changes in your `.nf` files.
@@ -314,7 +314,7 @@ H3Aflow is a complete, standalone pipeline. It does not require H3AGWAS to perfo
 | Meta-analysis | ❌ | ✅ |
 | DSL2 | ✅ | ❌ (requires NXF ≤ 22.10) |
 
-H3Aflow produces a fully QC-passed `cohort.bed / .bim / .fam` dataset that is directly compatible with the h3agwas `assoc` workflow — no format conversion needed.
+H3Aflow produces a fully QC-passed `cohort.bed / .bim / .fam` dataset that is directly compatible with the h3agwas `assoc` workflow, no format conversion needed.
 
 ---
 
