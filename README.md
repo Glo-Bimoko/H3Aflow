@@ -330,7 +330,7 @@ H3Aflow produces a fully QC-passed `cohort.bed / .bim / .fam` dataset that is di
 
 ## Citation
 
-If you use H3Aflow in your research, please cite:
+If you use H3Aflow in your research, give props to:
 
 > Glory Bimoko & the CPGR Team.
 
